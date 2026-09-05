@@ -18,6 +18,14 @@ type Params = { params: Promise<{ chatId: string }> };
 
 const NON_TERMINAL_RUN_STATUSES = ["QUEUED", "THINKING", "WORKING", "WAITING", "STOPPING"] as const;
 
+/** First text block, single line, capped — good enough for a list label. */
+function titleFromContent(content: { type: string; text?: string }[]): string | null {
+  const text = content.find((b) => b.type === "text")?.text;
+  if (!text) return null;
+  const singleLine = text.replace(/\s+/g, " ").trim();
+  return singleLine.length > 60 ? `${singleLine.slice(0, 60)}…` : singleLine;
+}
+
 async function requireOwnedChat(chatId: string, ownerId: string) {
   const chat = await prisma.chat.findFirst({ where: { id: chatId, ownerId, deletedAt: null } });
   if (!chat) throw new NotFoundError("Chat");
@@ -129,6 +137,12 @@ export async function POST(req: NextRequest, { params }: Params) {
   }
 
   const { userMessage, run } = await prisma.$transaction(async (tx) => {
+    // Auto-title on the first message so the chat list isn't just "New
+    // chat" repeated for every entry — checked inside the transaction so a
+    // concurrent send-turn on the same brand-new chat can't race this.
+    const isFirstMessage = (await tx.message.count({ where: { chatId } })) === 0;
+    const title = isFirstMessage ? titleFromContent(input.content) : null;
+
     const userMessage = await tx.message.create({
       data: {
         chatId,
@@ -140,6 +154,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     const run = await tx.agentRun.create({
       data: { chatId, idempotencyKey: input.idempotencyKey, status: "QUEUED" },
     });
+    // Bumps Chat.updatedAt too (Prisma's @updatedAt fires on any update()),
+    // which is what keeps the sidebar's most-recent-first ordering honest —
+    // creating a Message doesn't touch its parent Chat's timestamp on its own.
+    await tx.chat.update({ where: { id: chatId }, data: title ? { title } : {} });
     return { userMessage, run };
   });
 
