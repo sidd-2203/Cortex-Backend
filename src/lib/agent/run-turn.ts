@@ -16,10 +16,10 @@ const HISTORY_LIMIT = 50;
 /**
  * Executes one agent turn: loads recent chat history, calls OpenRouter Free,
  * persists the streamed assistant message, and settles the run's terminal
- * status. Deliberately synchronous/in-process for Day 1 — this is the exact
- * seam that becomes a Trigger.dev durable task once we need retries,
- * cancellation, and survival across server restarts (Day 2). Nothing above
- * this function (the route handler) should need to change when that happens.
+ * status. Runs inside the "agent-turn" Trigger.dev task
+ * (src/trigger/agent-turn.ts), which pipes each `onTextDelta` chunk to a
+ * Realtime stream the frontend subscribes to directly — the route handler
+ * that dispatches this never waits on it.
  */
 export async function runTurn(
   runId: string,
