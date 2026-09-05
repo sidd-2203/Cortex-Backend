@@ -1,0 +1,280 @@
+// Cortex — backend data model
+// Design notes:
+// - Ownership (ownerId) is enforced on every mutable entity so authorization
+//   can be checked with a single WHERE clause, never trusted from the client.
+// - Cursor pagination relies on the composite (createdAt, id) indexes below —
+//   never do an unbounded/offset scan over Message or Chat.
+// - JSONB (`Json` fields) is only used for validated, variable-shape payloads
+//   (message content blocks, tool input/output). It is never a substitute for
+//   a relational column — every field we filter/sort/join on is a real column.
+// - Idempotency keys are unique constraints, not just app-level checks, so a
+//   duplicate dispatch/completion/charge is rejected by the database itself.
+
+generator client {
+  provider = "prisma-client"
+  output   = "./generated/prisma"
+}
+
+// Prisma 7: connection URLs are no longer declared here — Migrate reads the
+// URL from prisma.config.ts, and PrismaClient gets it via the driver adapter
+// (see src/lib/db.ts). This block only declares the provider.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Identity & credits
+// ---------------------------------------------------------------------------
+
+/// Mirrors the Clerk user. `id` is the Clerk user id — no separate mapping
+/// table needed since Clerk is the only identity provider in scope.
+model User {
+  id            String   @id
+  email         String   @unique
+  /// Denormalized cache of SUM(CreditLedger.delta) for fast reads. The
+  /// ledger remains the source of truth; this column is only ever updated
+  /// inside the same transaction that inserts the ledger row that changes it.
+  creditBalance Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  chats        Chat[]
+  attachments  Attachment[]
+  creditLedger CreditLedger[]
+
+  @@map("users")
+}
+
+enum CreditReason {
+  GRANT
+  TOOL_CHARGE
+  REFUND
+  ADJUSTMENT
+}
+
+model CreditLedger {
+  id       String @id @default(cuid())
+  ownerId  String
+  owner    User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  /// Positive = credit granted, negative = debit.
+  delta    Int
+  reason   CreditReason
+  /// Set for TOOL_CHARGE rows. Unique so a given tool invocation can only
+  /// ever be settled once, no matter how many times settlement is retried.
+  relatedInvocationId String?         @unique
+  toolInvocation      ToolInvocation? @relation(fields: [relatedInvocationId], references: [id])
+  createdAt           DateTime        @default(now())
+
+  @@index([ownerId, createdAt])
+  @@map("credit_ledger")
+}
+
+// ---------------------------------------------------------------------------
+// Chats & messages
+// ---------------------------------------------------------------------------
+
+model Chat {
+  id        String   @id @default(cuid())
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  title     String   @default("New chat")
+  pinned    Boolean  @default(false)
+  /// Soft delete — rows are never hard-deleted so run/message history stays
+  /// auditable; deleted chats are simply excluded from list/read queries.
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+  runs     AgentRun[]
+
+  // List/search is always scoped to an owner, then filtered/sorted by these.
+  @@index([ownerId, deletedAt, pinned, updatedAt])
+  @@map("chats")
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+
+enum MessageStatus {
+  QUEUED
+  STREAMING
+  COMPLETE
+  FAILED
+  CANCELLED
+}
+
+model Message {
+  id        String        @id @default(cuid())
+  chatId    String
+  chat      Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  runId     String?
+  run       AgentRun?     @relation(fields: [runId], references: [id])
+  role      MessageRole
+  status    MessageStatus @default(COMPLETE)
+  /// Ordered content blocks: text | thinking | tool_use | tool_result | citation.
+  /// Validated against the Zod ContentBlock union at every write; JSONB here
+  /// only stores what already passed that schema.
+  content   Json
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  attachments Attachment[]
+
+  // Cursor pagination: WHERE chatId = ? AND (createdAt, id) < (cursor) ORDER BY createdAt DESC, id DESC
+  @@index([chatId, createdAt, id])
+  @@map("messages")
+}
+
+enum AttachmentType {
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  OTHER
+}
+
+enum AttachmentStatus {
+  UPLOADING
+  READY
+  FAILED
+}
+
+model Attachment {
+  id         String           @id @default(cuid())
+  messageId  String?
+  message    Message?         @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  ownerId    String
+  owner      User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  /// Transloadit assembly id — set once the tus upload is handed off.
+  assemblyId String?
+  type       AttachmentType
+  url        String?
+  status     AttachmentStatus @default(UPLOADING)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@index([ownerId, createdAt])
+  @@map("attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Agent runs (Trigger.dev durable tasks)
+// ---------------------------------------------------------------------------
+
+enum RunStatus {
+  QUEUED
+  THINKING
+  WORKING
+  WAITING // paused on a human waitpoint
+  STOPPING // cancellation requested, winding down
+  COMPLETE
+  FAILED
+  CANCELLED
+}
+
+model AgentRun {
+  id             String    @id @default(cuid())
+  chatId         String
+  chat           Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  status         RunStatus @default(QUEUED)
+  /// Client-supplied key for the send-turn request. Unique so a duplicate
+  ////retry send for the same turn can never dispatch a second run.
+  idempotencyKey String    @unique
+  /// Trigger.dev run handle, set once dispatch succeeds.
+  triggerRunId   String?
+  model          String? // actual OpenRouter model id that served this run
+  error          Json? // structured failure detail, surfaced verbatim in the UI
+  startedAt      DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime  @default(now())
+
+  messages Message[]
+  tools    ToolInvocation[]
+  skills   RunSkill[]
+  waitpoints Waitpoint[]
+
+  // "One active run per chat" is enforced by the partial unique index
+  // "one_active_run_per_chat" (status NOT IN terminal states), added by hand
+  // in migrations/20260905132637_one_active_run_per_chat — Prisma's schema
+  // DSL can't express a partial index directly, so it isn't declared here.
+  @@index([chatId, createdAt])
+  @@map("agent_runs")
+}
+
+enum ToolStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model ToolInvocation {
+  id         String     @id @default(cuid())
+  runId      String
+  run        AgentRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  toolName   String
+  input      Json
+  output     Json?
+  status     ToolStatus @default(PENDING)
+  /// Credits charged for this call; settled exactly once via CreditLedger.relatedInvocationId.
+  cost       Int        @default(0)
+  durationMs Int?
+  /// Deterministic ordering under parallel tool calls within one run.
+  sequence   Int
+  createdAt  DateTime   @default(now())
+  completedAt DateTime?
+
+  ledgerEntry CreditLedger?
+
+  @@index([runId, sequence])
+  @@map("tool_invocations")
+}
+
+model RunSkill {
+  id          String   @id @default(cuid())
+  runId       String
+  run         AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  skillName   String
+  contentHash String
+  loadedAt    DateTime @default(now())
+
+  // Dedup: the same skill can't be recorded twice for one run.
+  @@unique([runId, skillName])
+  @@map("run_skills")
+}
+
+enum WaitpointType {
+  APPROVAL
+  DECISION
+}
+
+enum WaitpointStatus {
+  PENDING
+  RESOLVED
+  EXPIRED
+}
+
+model Waitpoint {
+  id         String          @id @default(cuid())
+  runId      String
+  run        AgentRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  type       WaitpointType
+  status     WaitpointStatus @default(PENDING)
+  /// Opaque token handed to the client; resuming submits this token, and the
+  /// resume handler is idempotent on it so duplicate submissions are safe.
+  token      String          @unique
+  payload    Json?
+  resolution Json?
+  expiresAt  DateTime
+  createdAt  DateTime        @default(now())
+  resolvedAt DateTime?
+
+  @@index([runId])
+  @@map("waitpoints")
+}
