@@ -14,10 +14,17 @@ import { clerkMiddleware } from "@clerk/nextjs/server";
 // route here already enforces its own auth via requireUser() (see
 // src/lib/auth.ts), which is the resource itself deciding, not a path
 // pattern — so this file is CORS handling only now.
-const allowedOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:3001";
+// Comma-separated so a deployed FRONTEND_ORIGIN doesn't fight with local
+// dev — localhost:3001 is always allowed regardless of what's configured,
+// since needing to swap this value back and forth to test locally is its
+// own bug.
+const allowedOrigins = [
+  ...(process.env.FRONTEND_ORIGIN?.split(",").map((o) => o.trim()) ?? []),
+  "http://localhost:3001",
+];
 
 function withCors(res: NextResponse, origin: string | null) {
-  if (origin && origin === allowedOrigin) {
+  if (origin && allowedOrigins.includes(origin)) {
     res.headers.set("Access-Control-Allow-Origin", origin);
     res.headers.set("Vary", "Origin");
     res.headers.set("Access-Control-Allow-Credentials", "true");
