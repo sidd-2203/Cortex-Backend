@@ -23,8 +23,21 @@ const allowedOrigins = [
   "http://localhost:3001",
 ];
 
+// Every non-production frontend deployment (a unique URL per push, plus a
+// stable per-branch alias) gets a fresh vercel.app subdomain that FRONTEND_ORIGIN
+// can't be kept in sync with — there's a new one every deploy. Vercel's own
+// team slug in the hostname is what makes this safe to pattern-match rather
+// than exact-match: only deployments under this account can ever get a
+// cortex-frontend-*-cortex-2a0b.vercel.app hostname, so this can't be
+// spoofed by an unrelated vercel.app project.
+const PREVIEW_ORIGIN_PATTERN = /^https:\/\/cortex-frontend(-[a-z0-9-]+)?-cortex-2a0b\.vercel\.app$/;
+
+function isAllowedOrigin(origin: string): boolean {
+  return allowedOrigins.includes(origin) || PREVIEW_ORIGIN_PATTERN.test(origin);
+}
+
 function withCors(res: NextResponse, origin: string | null) {
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && isAllowedOrigin(origin)) {
     res.headers.set("Access-Control-Allow-Origin", origin);
     res.headers.set("Vary", "Origin");
     res.headers.set("Access-Control-Allow-Credentials", "true");
