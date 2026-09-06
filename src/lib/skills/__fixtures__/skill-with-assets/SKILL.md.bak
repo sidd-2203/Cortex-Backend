@@ -1,0 +1,1 @@
+a file inside the skill folder but outside assets/ - must not be readable via read_skill_asset either

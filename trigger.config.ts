@@ -1,4 +1,5 @@
 import { defineConfig } from "@trigger.dev/sdk";
+import { additionalFiles } from "@trigger.dev/build/extensions/core";
 
 export default defineConfig({
   project: "proj_jsblequlingyzgnshzvz",
@@ -19,4 +20,11 @@ export default defineConfig({
     },
   },
   dirs: ["./src/trigger"],
+  build: {
+    // agent-skills/*.md is read via fs at runtime (see src/lib/skills/registry.ts),
+    // not imported — Trigger.dev's build only bundles the static import graph
+    // by default, so without this the skill files simply wouldn't exist in
+    // the deployed task's filesystem.
+    extensions: [additionalFiles({ files: ["agent-skills/**/*"] })],
+  },
 });
