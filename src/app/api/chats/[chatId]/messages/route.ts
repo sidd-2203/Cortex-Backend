@@ -205,7 +205,24 @@ export async function POST(req: NextRequest, { params }: Params) {
       return { userMessage, run };
     });
 
-    const handle = await tasks.trigger("agent-turn", { agentRunId: run.id });
+    // If dispatch itself throws (a real incident: Trigger.dev unreachable,
+    // misconfigured, whatever), the run created above must not be left
+    // QUEUED with no triggerRunId — NON_TERMINAL_RUN_STATUSES treats QUEUED
+    // as active, so an un-dispatched run in that state blocks every future
+    // send on this chat forever, with nothing left to ever resolve it. Mark
+    // it FAILED so the one-active-run-per-chat check clears and the next
+    // send can go through.
+    let handle: Awaited<ReturnType<typeof tasks.trigger>>;
+    try {
+      handle = await tasks.trigger("agent-turn", { agentRunId: run.id });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to dispatch the run";
+      await prisma.agentRun.update({
+        where: { id: run.id },
+        data: { status: "FAILED", endedAt: new Date(), error: { code: "dispatch_failed", message } },
+      });
+      throw new ApiError(502, "dispatch_failed", "Failed to start this turn — please try again");
+    }
     await prisma.agentRun.update({ where: { id: run.id }, data: { triggerRunId: handle.id } });
 
     const body = SendTurnResponseSchema.parse({
