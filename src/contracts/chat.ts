@@ -59,12 +59,32 @@ export const SendTurnRequestSchema = z.object({
 });
 export type SendTurnRequest = z.infer<typeof SendTurnRequestSchema>;
 
+// A run subscription is everything the frontend needs to subscribe directly
+// to Trigger.dev Realtime for a run's output — it talks to Trigger.dev's API
+// for the actual token stream, not through our backend, which is what keeps
+// our route handlers fast (dispatch and return, never holding the
+// connection open for the full LLM completion).
+export const RunSubscriptionSchema = z.object({
+  runId: z.string(),
+  triggerRunId: z.string(),
+  publicAccessToken: z.string(),
+});
+export type RunSubscription = z.infer<typeof RunSubscriptionSchema>;
+
 export const SendTurnResponseSchema = z.object({
   chatId: z.string(),
   messageId: z.string(),
-  runId: z.string(),
-});
+}).merge(RunSubscriptionSchema);
 export type SendTurnResponse = z.infer<typeof SendTurnResponseSchema>;
+
+// --- Active run resume (GET /api/chats/:chatId/active-run) --------------
+// Reload recovery: on load, the frontend asks "is there an in-flight run on
+// this chat?" and if so gets a fresh subscription to resume it — the
+// original trigger-time token isn't persisted (short-lived by design), so
+// resuming always mints a new one scoped to the existing run.
+
+export const ActiveRunResponseSchema = RunSubscriptionSchema.nullable();
+export type ActiveRunResponse = z.infer<typeof ActiveRunResponseSchema>;
 
 // --- Chat management -----------------------------------------------------
 

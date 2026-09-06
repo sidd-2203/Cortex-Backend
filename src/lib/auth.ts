@@ -1,5 +1,6 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { prisma } from "./db";
+import { SIGNUP_GRANT_CREDITS } from "./credits/ledger";
 
 export class UnauthorizedError extends Error {
   constructor() {
@@ -24,9 +25,19 @@ export async function requireUser() {
   const clerkUser = await currentUser();
   const email = clerkUser?.primaryEmailAddress?.emailAddress ?? `${userId}@unknown.local`;
 
-  return prisma.user.upsert({
-    where: { id: userId },
-    update: {},
-    create: { id: userId, email },
-  });
+  // User creation and its starting-balance ledger entry land together —
+  // the ledger is the source of truth for how a balance got to where it
+  // is, so a balance should never exist without a row explaining it.
+  // create() (not upsert) so a concurrent duplicate call fails outright
+  // instead of silently granting credits twice — the loser just re-fetches
+  // what the winner created.
+  try {
+    const [user] = await prisma.$transaction([
+      prisma.user.create({ data: { id: userId, email, creditBalance: SIGNUP_GRANT_CREDITS } }),
+      prisma.creditLedger.create({ data: { ownerId: userId, delta: SIGNUP_GRANT_CREDITS, reason: "GRANT" } }),
+    ]);
+    return user;
+  } catch {
+    return prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  }
 }
