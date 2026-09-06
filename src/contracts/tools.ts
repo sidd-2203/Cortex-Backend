@@ -45,6 +45,9 @@ export function defineTool<TInputSchema extends z.ZodType, TOutputSchema extends
   description: string;
   inputSchema: TInputSchema;
   outputSchema: TOutputSchema;
+  cost?: number;
+  requiresApproval?: boolean;
+  approvalTimeoutSeconds?: number;
   execute: (input: z.infer<TInputSchema>, ctx: ToolExecutionContext) => Promise<z.infer<TOutputSchema>>;
 }) {
   return def;
@@ -72,4 +75,91 @@ export const ReadSkillAssetInputSchema = z.object({
 
 export const ReadSkillAssetOutputSchema = z.object({
   content: z.string(),
+});
+
+// --- crop_image (Magica `crop_image`) --------------------------------------
+
+export const CropImageInputSchema = z.object({
+  imageUrl: z.string().url().describe("URL of the image to crop."),
+  xPercent: z.number().min(0).max(100).default(0).describe("Crop start position from the left, as a percentage of image width."),
+  yPercent: z.number().min(0).max(100).default(0).describe("Crop start position from the top, as a percentage of image height."),
+  widthPercent: z.number().min(0).max(100).default(100).describe("Crop width, as a percentage of image width."),
+  heightPercent: z.number().min(0).max(100).default(100).describe("Crop height, as a percentage of image height."),
+});
+
+export const CropImageOutputSchema = z.object({
+  imageUrl: z.string().describe("URL of the cropped image."),
+});
+
+// --- merge_videos (Magica `merge_videos`) -----------------------------------
+
+export const MergeVideosInputSchema = z.object({
+  videoUrls: z
+    .array(z.string().url())
+    .min(2)
+    .max(100)
+    .describe("URLs of the videos to concatenate, in order. Between 2 and 100."),
+  transition: z.enum(["none", "fade", "dissolve"]).default("none").describe("Transition effect between clips."),
+});
+
+export const MergeVideosOutputSchema = z.object({
+  videoUrl: z.string().describe("URL of the merged video."),
+});
+
+// --- generate_image / edit_image (Magica `gpt_image_2`) ---------------------
+
+const ImageSizeSchema = z
+  .enum(["Auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "2048x1152", "3840x2160", "2160x3840"])
+  .default("Auto")
+  .describe("Output image dimensions, or Auto to let the model choose.");
+
+const ImageQualitySchema = z.enum(["High", "Medium", "Low"]).default("High").describe("Rendering quality; higher costs more.");
+
+const ImageBackgroundSchema = z
+  .enum(["Auto", "Opaque", "Transparent"])
+  .default("Auto")
+  .describe("Transparent requires outputFormat PNG or WebP.");
+
+const ImageOutputFormatSchema = z.enum(["PNG", "JPEG", "WebP"]).default("PNG");
+
+function refineTransparentBackground<T extends { background: string; outputFormat: string }>(data: T, ctx: z.RefinementCtx) {
+  if (data.background === "Transparent" && data.outputFormat === "JPEG") {
+    ctx.addIssue({
+      code: "custom",
+      path: ["outputFormat"],
+      message: "Transparent background requires outputFormat PNG or WebP, not JPEG.",
+    });
+  }
+}
+
+export const GenerateImageInputSchema = z
+  .object({
+    prompt: z.string().min(1).max(4000).describe("Description of the image to generate."),
+    size: ImageSizeSchema,
+    quality: ImageQualitySchema,
+    background: ImageBackgroundSchema,
+    numberOfImages: z.number().int().min(1).max(4).default(1).describe("How many image variations to generate."),
+    outputFormat: ImageOutputFormatSchema,
+  })
+  .superRefine(refineTransparentBackground);
+
+export const GenerateImageOutputSchema = z.object({
+  imageUrls: z.array(z.string()).describe("URLs of the generated images."),
+});
+
+export const EditImageInputSchema = z
+  .object({
+    prompt: z.string().min(1).max(4000).describe("Description of how to edit the image(s)."),
+    imageUrls: z.array(z.string().url()).min(1).max(10).describe("Source images to edit, 1 to 10."),
+    maskUrl: z.string().url().optional().describe("Optional mask image URL marking the region to edit."),
+    size: ImageSizeSchema,
+    quality: ImageQualitySchema,
+    background: ImageBackgroundSchema,
+    numberOfImages: z.number().int().min(1).max(4).default(1).describe("How many edited variations to generate."),
+    outputFormat: ImageOutputFormatSchema,
+  })
+  .superRefine(refineTransparentBackground);
+
+export const EditImageOutputSchema = z.object({
+  imageUrls: z.array(z.string()).describe("URLs of the edited images."),
 });
