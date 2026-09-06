@@ -217,10 +217,23 @@ export async function POST(req: NextRequest, { params }: Params) {
       handle = await tasks.trigger("agent-turn", { agentRunId: run.id });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to dispatch the run";
-      await prisma.agentRun.update({
-        where: { id: run.id },
-        data: { status: "FAILED", endedAt: new Date(), error: { code: "dispatch_failed", message } },
-      });
+      // A FAILED assistant message, not just a FAILED run row, is what
+      // makes this visible after a reload — runTurn's own failure path
+      // already creates one for a mid-turn crash (see run-turn.ts), so the
+      // frontend's `status === "FAILED"` rendering already exists and just
+      // needs a row to render for a dispatch-time failure too. Without
+      // this, a reload shows the user's message with silence: nothing ever
+      // gets created here otherwise, since runTurn (which normally creates
+      // the assistant message) never got to run at all.
+      await prisma.$transaction([
+        prisma.agentRun.update({
+          where: { id: run.id },
+          data: { status: "FAILED", endedAt: new Date(), error: { code: "dispatch_failed", message } },
+        }),
+        prisma.message.create({
+          data: { chatId, runId: run.id, role: "ASSISTANT", status: "FAILED", content: [] },
+        }),
+      ]);
       throw new ApiError(502, "dispatch_failed", "Failed to start this turn — please try again");
     }
     await prisma.agentRun.update({ where: { id: run.id }, data: { triggerRunId: handle.id } });
