@@ -6,6 +6,8 @@ import { withApiError, ApiError, NotFoundError } from "@/lib/api-error";
 import { newTraceId } from "@/lib/logger";
 import { serializeMessage } from "@/lib/serialize";
 import { encodeCursor, decodeCursor } from "@/lib/cursor";
+import type { AttachmentBlock, ContentBlock } from "@/contracts/content-blocks";
+import type { Prisma } from "../../../../../../prisma/generated/prisma/client";
 import {
   SendTurnRequestSchema,
   SendTurnResponseSchema,
@@ -30,6 +32,38 @@ async function requireOwnedChat(chatId: string, ownerId: string) {
   const chat = await prisma.chat.findFirst({ where: { id: chatId, ownerId, deletedAt: null } });
   if (!chat) throw new NotFoundError("Chat");
   return chat;
+}
+
+/**
+ * Resolves attachmentIds into content blocks, or throws — a caller citing
+ * an attachment that isn't theirs, isn't finished uploading, or is already
+ * attached to a different message is a bug in the client, not something to
+ * silently drop, so this fails the whole send rather than sending a
+ * half-attached message.
+ */
+async function resolveAttachmentBlocks(attachmentIds: string[], ownerId: string): Promise<AttachmentBlock[]> {
+  if (attachmentIds.length === 0) return [];
+
+  const attachments = await prisma.attachment.findMany({ where: { id: { in: attachmentIds }, ownerId } });
+  const byId = new Map(attachments.map((a) => [a.id, a]));
+
+  return attachmentIds.map((id) => {
+    const attachment = byId.get(id);
+    if (!attachment) throw new ApiError(400, "invalid_attachment", `Attachment ${id} not found`);
+    if (attachment.status !== "READY" || !attachment.url) {
+      throw new ApiError(400, "attachment_not_ready", `Attachment ${id} has not finished uploading`);
+    }
+    if (attachment.messageId) {
+      throw new ApiError(400, "attachment_already_used", `Attachment ${id} is already attached to another message`);
+    }
+    return {
+      type: "attachment",
+      attachmentId: attachment.id,
+      attachmentType: attachment.type,
+      url: attachment.url,
+      filename: null,
+    };
+  });
 }
 
 export async function GET(req: NextRequest, { params }: Params) {
@@ -128,6 +162,12 @@ export async function POST(req: NextRequest, { params }: Params) {
       throw new ApiError(409, "run_in_progress", "This chat already has an active run");
     }
 
+    // Resolved outside the transaction (read-only lookup) — the "not
+    // already attached elsewhere" race is what the transaction actually
+    // needs to guard, via the conditional updateMany below.
+    const attachmentBlocks = await resolveAttachmentBlocks(input.attachmentIds, user.id);
+    const content: ContentBlock[] = [...input.content, ...attachmentBlocks];
+
     const { userMessage, run } = await prisma.$transaction(async (tx) => {
       // Auto-title on the first message so the chat list isn't just "New
       // chat" repeated for every entry — checked inside the transaction so
@@ -136,8 +176,24 @@ export async function POST(req: NextRequest, { params }: Params) {
       const title = isFirstMessage ? titleFromContent(input.content) : null;
 
       const userMessage = await tx.message.create({
-        data: { chatId, role: "USER", status: "COMPLETE", content: input.content },
+        data: { chatId, role: "USER", status: "COMPLETE", content: content as unknown as Prisma.InputJsonValue },
       });
+
+      if (attachmentBlocks.length > 0) {
+        // updateMany's `messageId: null` guard is the actual race backstop:
+        // if two concurrent sends both resolved the same attachment as free,
+        // only one of these updates a row — count comes back short and this
+        // send fails rather than silently stealing an attachment already
+        // claimed by the other.
+        const { count } = await tx.attachment.updateMany({
+          where: { id: { in: attachmentBlocks.map((b) => b.attachmentId) }, messageId: null },
+          data: { messageId: userMessage.id },
+        });
+        if (count !== attachmentBlocks.length) {
+          throw new ApiError(409, "attachment_race", "One or more attachments were claimed by another message");
+        }
+      }
+
       const run = await tx.agentRun.create({
         data: { chatId, idempotencyKey: input.idempotencyKey, status: "QUEUED" },
       });

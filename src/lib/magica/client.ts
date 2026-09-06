@@ -1,19 +1,14 @@
 // Magica client — the generic "run a node, poll until it settles" flow that
-// all three required Magica tools (Crop Image, GPT Image 2, Merge Videos)
-// share. Server-to-server only: MAGICA_API_KEY must never reach client
-// code, a prompt, a log line, or a persisted message.
+// every Magica-backed tool (Crop Image, GPT Image 2, Merge Videos) shares.
+// Server-to-server only: MAGICA_API_KEY must never reach client code, a
+// prompt, a log line, or a persisted message.
 //
-// ⚠️ The URL shape below (`POST /v1/nodes/{nodeType}/run`, then
-// `GET /v1/nodes/runs/{runId}`) is straight from the project brief and is
-// solid. The JSON *body* shapes are NOT — the brief documents the endpoints
-// but not their request/response fields, so the field names marked TODO
-// below are placeholders pending the real Magica developer docs. Nothing
-// registers a Magica-backed tool into the tool registry until those are
-// confirmed: a wrong guess here would fail silently against the live API
-// rather than loudly, which is the worst outcome for an integration whose
-// whole requirement is being real end-to-end.
+// Endpoint shapes below are from Magica's published API reference
+// (magica.com/docs/api-reference/nodes), not guessed: POST starts a run and
+// returns only `runId`; GET polls and returns the full run record keyed by
+// `id`, with `status` one of QUEUED/RUNNING/COMPLETED/FAILED/CANCELED.
 
-const DEFAULT_BASE_URL = "https://api.magica.dev";
+const DEFAULT_BASE_URL = "https://inference.magica.com";
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -63,11 +58,9 @@ export async function startRun(nodeType: string, input: unknown): Promise<string
     throw new MagicaError(`Magica run failed to start (${res.status}): ${body}`, res.status);
   }
 
-  const data = (await res.json()) as { runId?: string; id?: string };
-  // TODO(magica-docs): confirm whether the id field is `runId` or `id`.
-  const runId = data.runId ?? data.id;
-  if (!runId) throw new MagicaError("Magica did not return a run id");
-  return runId;
+  const data = (await res.json()) as { runId?: string };
+  if (!data.runId) throw new MagicaError("Magica did not return a run id");
+  return data.runId;
 }
 
 /** GET /v1/nodes/runs/{runId} — one poll of a run's current state. */
@@ -81,20 +74,23 @@ export async function getRunStatus(runId: string): Promise<MagicaRunStatus> {
     throw new MagicaError(`Magica poll failed (${res.status}): ${body}`, res.status);
   }
 
-  // TODO(magica-docs): confirm the real status vocabulary and output field.
-  const data = (await res.json()) as { status?: string; state?: string; output?: unknown; error?: string };
-  const raw = (data.status ?? data.state ?? "").toLowerCase();
+  const data = (await res.json()) as {
+    status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED";
+    output?: unknown;
+    error?: string | null;
+    userMessage?: string | null;
+  };
 
   const state: MagicaRunState =
-    raw === "completed" || raw === "succeeded" || raw === "success"
+    data.status === "COMPLETED"
       ? "completed"
-      : raw === "failed" || raw === "error" || raw === "cancelled"
+      : data.status === "FAILED" || data.status === "CANCELED"
         ? "failed"
-        : raw === "running" || raw === "processing" || raw === "in_progress"
+        : data.status === "RUNNING"
           ? "running"
-          : "pending";
+          : "pending"; // QUEUED
 
-  return { runId, state, output: data.output, error: data.error };
+  return { runId, state, output: data.output, error: data.error ?? data.userMessage ?? undefined };
 }
 
 /**

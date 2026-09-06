@@ -34,12 +34,28 @@ export const CitationBlockSchema = z.object({
   source: z.string(),
 });
 
+export const AttachmentTypeSchema = z.enum(["IMAGE", "VIDEO", "AUDIO", "DOCUMENT", "OTHER"]);
+
+// A user-uploaded file (via Transloadit), attached to the message that sent
+// it. `url` is the stable, permanent URL once the upload has finished
+// processing — attachmentIds only resolve into one of these once their
+// Attachment row is READY (see the send-turn route), so this block is never
+// persisted mid-upload.
+export const AttachmentBlockSchema = z.object({
+  type: z.literal("attachment"),
+  attachmentId: z.string(),
+  attachmentType: AttachmentTypeSchema,
+  url: z.string(),
+  filename: z.string().nullable(),
+});
+
 export const ContentBlockSchema = z.discriminatedUnion("type", [
   TextBlockSchema,
   ThinkingBlockSchema,
   ToolUseBlockSchema,
   ToolResultBlockSchema,
   CitationBlockSchema,
+  AttachmentBlockSchema,
 ]);
 
 export const MessageContentSchema = z.array(ContentBlockSchema);
@@ -49,5 +65,7 @@ export type ThinkingBlock = z.infer<typeof ThinkingBlockSchema>;
 export type ToolUseBlock = z.infer<typeof ToolUseBlockSchema>;
 export type ToolResultBlock = z.infer<typeof ToolResultBlockSchema>;
 export type CitationBlock = z.infer<typeof CitationBlockSchema>;
+export type AttachmentType = z.infer<typeof AttachmentTypeSchema>;
+export type AttachmentBlock = z.infer<typeof AttachmentBlockSchema>;
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 export type MessageContent = z.infer<typeof MessageContentSchema>;

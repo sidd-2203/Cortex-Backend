@@ -48,15 +48,23 @@ export async function runTurn(
     take: HISTORY_LIMIT,
   });
 
-  // Only the final text of past turns is replayed as context — a past
-  // turn's own tool_use/tool_result exchange already resolved into that
-  // text and isn't a valid standalone tool_calls/tool-role pair outside
-  // the single request it happened in, so it isn't reconstructed here.
+  // Only text (and attachment references, as a plain-text mention of their
+  // URL) survives into replayed context — a past turn's own tool_use/
+  // tool_result exchange already resolved into its final text and isn't a
+  // valid standalone tool_calls/tool-role pair outside the single request
+  // it happened in, so it isn't reconstructed here. Attachments aren't sent
+  // as multimodal content (most free OpenRouter models don't support it
+  // reliably) — the model sees the URL as text and can pass it into a tool
+  // call itself (e.g. crop_image's imageUrl) if it needs to act on it.
   const orMessages: OpenRouterMessage[] = history.map((m) => ({
     role: m.role === "USER" ? "user" : m.role === "SYSTEM" ? "system" : "assistant",
     content: (m.content as MessageContent)
-      .filter((b): b is Extract<MessageContent[number], { type: "text" }> => b.type === "text")
-      .map((b) => b.text)
+      .map((b) => {
+        if (b.type === "text") return b.text;
+        if (b.type === "attachment") return `[Attached ${b.attachmentType.toLowerCase()}: ${b.url}]`;
+        return null;
+      })
+      .filter((s): s is string => s !== null)
       .join("\n"),
   }));
 
