@@ -19,6 +19,15 @@ export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
   outputSchema: z.ZodType<TOutput>;
   /** Credits charged per call. Omitted/0 for free tools (e.g. the skills tools). */
   cost?: number;
+  /**
+   * Gates the call behind a human approval waitpoint before execute() ever
+   * runs — for anything a model shouldn't be able to trigger unilaterally
+   * (a real charge, a destructive action). Rejected or timed-out approval
+   * short-circuits to a failed tool_result; execute() is never called.
+   */
+  requiresApproval?: boolean;
+  /** How long to wait for a decision before treating it as expired. Default 5 minutes. */
+  approvalTimeoutSeconds?: number;
   execute: (input: TInput, ctx: ToolExecutionContext) => Promise<TOutput>;
 }
 

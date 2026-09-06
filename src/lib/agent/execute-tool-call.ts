@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import { toolRegistry } from "@/lib/tools/registry";
 import { requireSufficientCredits, settleToolCharge, InsufficientCreditsError } from "@/lib/credits/ledger";
+import { requestApproval } from "@/lib/waitpoints/approval";
 import type { ToolExecutionContext } from "@/contracts/tools";
 import type { ToolUseBlock, ToolResultBlock } from "@/contracts/content-blocks";
 import type { Prisma } from "../../../prisma/generated/prisma/client";
@@ -73,6 +74,20 @@ export async function executeToolCall(
     }
     input = inputResult.data;
     toolUseBlock.input = inputResult.data;
+
+    // Approval gate, before anything else — a human decides whether this
+    // call happens at all before we even check whether it can be paid for.
+    if (tool.requiresApproval) {
+      const decision = await requestApproval({
+        runId: ctx.runId,
+        toolName: call.name,
+        input: inputResult.data,
+        timeoutSeconds: tool.approvalTimeoutSeconds ?? 300,
+      });
+      if (!decision.approved) {
+        throw new Error(`Approval was denied${decision.comment ? `: ${decision.comment}` : ""}`);
+      }
+    }
 
     // Pre-flight check — avoids ever starting real (possibly expensive,
     // possibly slow external API) work for a call that can't be paid for.
