@@ -86,6 +86,31 @@ export type SendTurnResponse = z.infer<typeof SendTurnResponseSchema>;
 export const ActiveRunResponseSchema = RunSubscriptionSchema.nullable();
 export type ActiveRunResponse = z.infer<typeof ActiveRunResponseSchema>;
 
+// --- Run cancellation (POST /api/runs/:runId/cancel) ---------------------
+// Cooperative, not a kill: this only flips the run to STOPPING. The task
+// itself notices between steps and winds down (see run-turn.ts), which is
+// what keeps a half-finished Magica job from being orphaned mid-flight.
+
+export const RunStatusSchema = z.enum([
+  "QUEUED",
+  "THINKING",
+  "WORKING",
+  "WAITING",
+  "STOPPING",
+  "COMPLETE",
+  "FAILED",
+  "CANCELLED",
+]);
+export type RunStatus = z.infer<typeof RunStatusSchema>;
+
+export const CancelRunResponseSchema = z.object({
+  // The run's status after the request. STOPPING on success; an already
+  // terminal status is returned as-is rather than erroring, so a
+  // double-click on Stop is harmless.
+  status: RunStatusSchema,
+});
+export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
+
 // --- Chat management -----------------------------------------------------
 
 export const CreateChatRequestSchema = z.object({

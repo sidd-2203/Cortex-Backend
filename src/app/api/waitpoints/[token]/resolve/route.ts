@@ -3,7 +3,7 @@ import { wait } from "@trigger.dev/sdk";
 import { requireUser } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { withApiError, NotFoundError } from "@/lib/api-error";
-import { newTraceId } from "@/lib/logger";
+import { newTraceId, logger } from "@/lib/logger";
 import { ResolveWaitpointRequestSchema, ResolveWaitpointResponseSchema } from "@/contracts/waitpoints";
 import type { Prisma } from "../../../../../../prisma/generated/prisma/client";
 
@@ -45,7 +45,11 @@ export async function POST(req: NextRequest, { params }: Params) {
 
     const input = ResolveWaitpointRequestSchema.parse(await req.json());
 
-    await wait.completeToken(token, { approved: input.approved, comment: input.comment });
+    await wait.completeToken(token, {
+      approved: input.approved,
+      approveAll: input.approveAll,
+      comment: input.comment,
+    });
 
     // Best-effort immediate reflection in our own row — the task-side
     // continuation (requestApproval, after its own wait.forToken resolves)
@@ -55,9 +59,21 @@ export async function POST(req: NextRequest, { params }: Params) {
       where: { token, status: "PENDING" },
       data: {
         status: "RESOLVED",
-        resolution: asJson({ approved: input.approved, comment: input.comment }),
+        resolution: asJson({
+          approved: input.approved,
+          approveAll: input.approveAll,
+          comment: input.comment,
+        }),
         resolvedAt: new Date(),
       },
+    });
+
+    logger.info("waitpoint resolved by user", {
+      traceId,
+      runId: waitpoint.runId,
+      waitpointTokenId: token,
+      approved: input.approved,
+      approveAll: input.approveAll ?? false,
     });
 
     return NextResponse.json(ResolveWaitpointResponseSchema.parse({ status: "RESOLVED" }));

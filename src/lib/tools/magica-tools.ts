@@ -20,12 +20,18 @@ const CROP_IMAGE_COST = 1;
 const MERGE_VIDEOS_COST = 3;
 const GPT_IMAGE_2_COST = 5;
 
+// Every tool here spends real credits, so every one of them is gated on a
+// human approval (see requestApproval). The skills tools are free and stay
+// ungated. One "Approve all" answer covers the rest of that turn, so a
+// multi-step job asks once rather than once per call.
+
 export const cropImageTool = defineTool({
   name: "crop_image",
   description: "Crop an image to a rectangular region, specified as percentages of the source image's dimensions.",
   inputSchema: CropImageInputSchema,
   outputSchema: CropImageOutputSchema,
   cost: CROP_IMAGE_COST,
+  requiresApproval: true,
   execute: async (input) => {
     const output = (await runNodeAndWait("crop_image", {
       input: {
@@ -49,6 +55,7 @@ export const mergeVideosTool = defineTool({
   inputSchema: MergeVideosInputSchema,
   outputSchema: MergeVideosOutputSchema,
   cost: MERGE_VIDEOS_COST,
+  requiresApproval: true,
   execute: async (input) => {
     const output = (await runNodeAndWait("merge_videos", {
       input: {
@@ -82,6 +89,7 @@ export const generateImageTool = defineTool({
   inputSchema: GenerateImageInputSchema,
   outputSchema: GenerateImageOutputSchema,
   cost: GPT_IMAGE_2_COST,
+  requiresApproval: true,
   execute: async (input) => {
     const output = await runNodeAndWait("gpt_image_2", {
       subModelId: "gpt-image-2-text",
@@ -104,6 +112,7 @@ export const editImageTool = defineTool({
   inputSchema: EditImageInputSchema,
   outputSchema: EditImageOutputSchema,
   cost: GPT_IMAGE_2_COST,
+  requiresApproval: true,
   execute: async (input) => {
     const output = await runNodeAndWait("gpt_image_2", {
       subModelId: "gpt-image-2-edit",

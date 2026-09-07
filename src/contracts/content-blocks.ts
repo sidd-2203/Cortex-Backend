@@ -26,6 +26,7 @@ export const ToolResultBlockSchema = z.object({
   toolUseId: z.string(),
   output: z.unknown(),
   isError: z.boolean().default(false),
+  durationMs: z.number().optional(),
 });
 
 export const CitationBlockSchema = z.object({

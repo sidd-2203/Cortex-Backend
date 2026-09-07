@@ -6,12 +6,28 @@ import { requireSufficientCredits, settleToolCharge, InsufficientCreditsError } 
 import { requestApproval } from "@/lib/waitpoints/approval";
 import type { ToolExecutionContext } from "@/contracts/tools";
 import type { ToolUseBlock, ToolResultBlock } from "@/contracts/content-blocks";
+import type { ToolStreamEvent } from "@/contracts/tool-stream";
 import type { Prisma } from "../../../prisma/generated/prisma/client";
 
 export interface ToolCallRequest {
   id: string;
   name: string;
   arguments: string; // raw JSON string, as OpenRouter/OpenAI hand it back
+}
+
+/**
+ * Shared across every tool call in one turn — "approve all" flips this once
+ * and every later paid call in the same loop skips its own gate. In-memory
+ * on purpose: it dies with the turn, so consent granted for one turn can
+ * never leak into the next one.
+ */
+export interface TurnApprovalState {
+  approveAll: boolean;
+}
+
+export interface ExecuteToolCallOptions {
+  approvalState?: TurnApprovalState;
+  onApprovalEvent?: (event: ToolStreamEvent) => void;
 }
 
 export interface ExecutedToolCall {
@@ -39,6 +55,7 @@ export async function executeToolCall(
   call: ToolCallRequest,
   sequence: number,
   ctx: ToolExecutionContext,
+  options?: ExecuteToolCallOptions,
 ): Promise<ExecutedToolCall> {
   const toolUseBlock: ToolUseBlock = {
     type: "tool_use",
@@ -77,13 +94,22 @@ export async function executeToolCall(
 
     // Approval gate, before anything else — a human decides whether this
     // call happens at all before we even check whether it can be paid for.
-    if (tool.requiresApproval) {
+    // Skipped once this turn's "approve all" has been granted.
+    if (tool.requiresApproval && !options?.approvalState?.approveAll) {
       const decision = await requestApproval({
         runId: ctx.runId,
+        toolUseId: call.id,
         toolName: call.name,
         input: inputResult.data,
+        cost,
         timeoutSeconds: tool.approvalTimeoutSeconds ?? 300,
+        onEvent: options?.onApprovalEvent,
       });
+      // Only an approval can carry consent forward — a denial that happened
+      // to arrive with the flag set must not unlock the rest of the turn.
+      if (decision.approved && decision.approveAll && options?.approvalState) {
+        options.approvalState.approveAll = true;
+      }
       if (!decision.approved) {
         throw new Error(`Approval was denied${decision.comment ? `: ${decision.comment}` : ""}`);
       }
@@ -154,6 +180,7 @@ export async function executeToolCall(
     toolUseId: call.id,
     output: status === "SUCCEEDED" ? output : { error: errorMessage },
     isError: status === "FAILED",
+    durationMs,
   };
 
   return {
