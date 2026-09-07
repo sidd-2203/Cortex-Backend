@@ -1,5 +1,7 @@
-// Mints a public-API key for a given user. Script-issued by design (see the
-// bonus-scope scoping conversation) — no self-serve UI in this pass.
+// Mints a public-API key for a given user. Terminal-based alternative to
+// the sidebar's API Keys dialog (POST /api/keys) — useful for minting a
+// key for another user, or without a browser session at all. Both paths
+// share generateApiKey() (see auth-api-key.ts).
 //
 // Usage: npx tsx scripts/mint-api-key.ts <userId-or-email> [name]
 //

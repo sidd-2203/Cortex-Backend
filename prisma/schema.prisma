@@ -288,8 +288,10 @@ model Waitpoint {
 
 /// A developer credential for the public REST API — distinct from the
 /// Clerk session tokens the first-party frontend uses, since a script or
-/// server calling the API has no browser session to hold one. Script-issued
-/// only (see scripts/mint-api-key.ts) — no self-serve UI in this scope.
+/// server calling the API has no browser session to hold one. Self-serve
+/// via /api/keys (Clerk-authed) and the sidebar's API Keys dialog, or
+/// scripts/mint-api-key.ts from a terminal — both paths share
+/// generateApiKey() in auth-api-key.ts.
 model ApiKey {
   id         String    @id @default(cuid())
   ownerId    String

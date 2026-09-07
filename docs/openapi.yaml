@@ -253,7 +253,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: "ctx_live_..."
-      description: An API key minted via `scripts/mint-api-key.ts` — see **Authentication**.
+      description: An API key created from the Cortex app's sidebar — see **Authentication**.
 
   parameters:
     ChatId:

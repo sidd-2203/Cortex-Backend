@@ -9,25 +9,14 @@ has no browser session to hold one.
 
 ## Getting a key
 
-Keys are minted with a script, not a settings page, in this release:
+Sign in to Cortex, open the key icon in the sidebar footer, and create a
+key by name. The full key is shown **exactly once**, right there — copy it
+before closing the dialog. From the same screen you can see every key's
+prefix, when it was created, when it was last used, and revoke it.
 
-```bash
-npx tsx scripts/mint-api-key.ts <your-user-id-or-email> [a label]
-```
-
-This prints the full key **exactly once**:
-
-```
-API key created for you@example.com (user_abc123):
-
-  ctx_live_9f2a1b...
-
-This is shown once — it is not stored anywhere retrievable. Save it now.
-Use it as: Authorization: Bearer <key>
-```
-
-Only its SHA-256 hash and its first 16 characters (for display in a future
-listing) are ever persisted — if you lose the key, mint a new one.
+Only the key's SHA-256 hash and its first 16 characters (for display in
+the list) are ever persisted — if you lose the key, revoke it and create
+a new one.
 
 ## Using it
 
