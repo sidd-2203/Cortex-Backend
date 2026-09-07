@@ -129,16 +129,18 @@ export async function runTurn(
         contentBlocks.push({ type: "text", text: result.fullText });
       }
 
-      if (result.toolCalls.length === 0) {
-        break; // model gave a final answer — no more tool calls requested
-      }
-
-      // Second checkpoint, after the model call and before any tool runs:
-      // a Stop pressed while the model was thinking should never go on to
-      // spend credits on the tools it just asked for.
+      // Checked before either exit from this iteration — a Stop pressed
+      // while the model was mid-response must be reflected in the run's
+      // own terminal status even when the model happened to land on a
+      // final answer right as it landed, not just when there were more
+      // tool calls left to skip.
       if (await isStopRequested(runId)) {
         cancelled = true;
         break;
+      }
+
+      if (result.toolCalls.length === 0) {
+        break; // model gave a final answer — no more tool calls requested
       }
 
       const toolCalls: OpenRouterToolCall[] = result.toolCalls.map((tc) => ({

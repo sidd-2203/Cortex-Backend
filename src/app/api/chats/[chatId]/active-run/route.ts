@@ -40,6 +40,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
       runId: activeRun.id,
       triggerRunId: activeRun.triggerRunId,
       publicAccessToken,
+      status: activeRun.status,
     });
     return NextResponse.json(body);
   });

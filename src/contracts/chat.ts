@@ -83,14 +83,6 @@ export type SendTurnResponse = z.infer<typeof SendTurnResponseSchema>;
 // original trigger-time token isn't persisted (short-lived by design), so
 // resuming always mints a new one scoped to the existing run.
 
-export const ActiveRunResponseSchema = RunSubscriptionSchema.nullable();
-export type ActiveRunResponse = z.infer<typeof ActiveRunResponseSchema>;
-
-// --- Run cancellation (POST /api/runs/:runId/cancel) ---------------------
-// Cooperative, not a kill: this only flips the run to STOPPING. The task
-// itself notices between steps and winds down (see run-turn.ts), which is
-// what keeps a half-finished Magica job from being orphaned mid-flight.
-
 export const RunStatusSchema = z.enum([
   "QUEUED",
   "THINKING",
@@ -102,6 +94,20 @@ export const RunStatusSchema = z.enum([
   "CANCELLED",
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
+
+// Carries the run's own status, not just the subscription — a reload in
+// the middle of a stopping run has to be able to tell that it's winding
+// down rather than presenting a live Stop button for a run that's already
+// been told to stop.
+export const ActiveRunResponseSchema = RunSubscriptionSchema.extend({
+  status: RunStatusSchema,
+}).nullable();
+export type ActiveRunResponse = z.infer<typeof ActiveRunResponseSchema>;
+
+// --- Run cancellation (POST /api/runs/:runId/cancel) ---------------------
+// Cooperative, not a kill: this only flips the run to STOPPING. The task
+// itself notices between steps and winds down (see run-turn.ts), which is
+// what keeps a half-finished Magica job from being orphaned mid-flight.
 
 export const CancelRunResponseSchema = z.object({
   // The run's status after the request. STOPPING on success; an already
