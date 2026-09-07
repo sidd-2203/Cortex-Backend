@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { waitUntil } from "@trigger.dev/sdk";
 import { prisma } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import { toolRegistry } from "@/lib/tools/registry";
@@ -176,14 +177,19 @@ export async function executeToolCall(
     }
   }
 
-  void dispatchWebhookEvent(ctx.ownerId, "tool.completed", {
-    runId: ctx.runId,
-    chatId: ctx.chatId,
-    toolName: call.name,
-    status,
-    cost: status === "SUCCEEDED" ? cost : 0,
-    durationMs,
-  });
+  // waitUntil, not a bare `void` — see the same call in run-turn.ts: an
+  // unawaited promise inside a task dies with the execution context, which
+  // silently dropped deliveries fired near the end of a run.
+  waitUntil(
+    dispatchWebhookEvent(ctx.ownerId, "tool.completed", {
+      runId: ctx.runId,
+      chatId: ctx.chatId,
+      toolName: call.name,
+      status,
+      cost: status === "SUCCEEDED" ? cost : 0,
+      durationMs,
+    }),
+  );
 
   const toolResultBlock: ToolResultBlock = {
     type: "tool_result",

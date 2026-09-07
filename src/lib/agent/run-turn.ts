@@ -5,6 +5,7 @@ import { toolRegistry } from "@/lib/tools/registry";
 import { ensureToolsRegistered } from "@/lib/tools/bootstrap";
 import { executeToolCall, type TurnApprovalState } from "./execute-tool-call";
 import { getSkillsRegistry } from "@/lib/skills/registry";
+import { waitUntil } from "@trigger.dev/sdk";
 import { dispatchWebhookEvent } from "@/lib/webhooks/dispatch";
 import type { MessageContent } from "@/contracts/content-blocks";
 import type { ToolStreamEvent } from "@/contracts/tool-stream";
@@ -106,9 +107,15 @@ export async function runTurn(
     data: { status: "WORKING", startedAt: new Date() },
   });
 
-  // Fire-and-forget by design (see dispatch.ts) — never awaited, never
-  // allowed to affect the turn it's reporting on.
-  void dispatchWebhookEvent(ownerId, "agent.started", { runId, chatId: run.chatId });
+  // Never awaited — a slow or dead webhook receiver must not add latency to
+  // (or fail) the turn it's reporting on. But a bare `void` isn't enough
+  // inside a task: an unawaited promise dies with the execution context when
+  // the task function returns. waitUntil keeps the run alive until delivery
+  // settles without blocking the work in between. Confirmed live before
+  // adding it — agent.started (fired early, with the whole turn still to run
+  // behind it) delivered fine, while agent.completed (fired just before the
+  // function returns) never arrived at all.
+  waitUntil(dispatchWebhookEvent(ownerId, "agent.started", { runId, chatId: run.chatId }));
 
   const previousAssistantMessage = await prisma.message.findFirst({
     where: { chatId: run.chatId, runId, role: "ASSISTANT" },
@@ -225,12 +232,14 @@ export async function runTurn(
       }),
     ]);
 
-    void dispatchWebhookEvent(ownerId, "agent.completed", {
-      runId,
-      chatId: run.chatId,
-      status: cancelled ? "CANCELLED" : "COMPLETE",
-      messageId: assistantMessage.id,
-    });
+    waitUntil(
+      dispatchWebhookEvent(ownerId, "agent.completed", {
+        runId,
+        chatId: run.chatId,
+        status: cancelled ? "CANCELLED" : "COMPLETE",
+        messageId: assistantMessage.id,
+      }),
+    );
   } catch (err) {
     // Persisted structured, not as a bare string — the UI has to be able to
     // explain a failed turn on its own ("rate limited, try again shortly"
@@ -252,7 +261,7 @@ export async function runTurn(
         }),
       ]);
 
-      void dispatchWebhookEvent(ownerId, "agent.failed", { runId, chatId: run.chatId, code, message });
+      waitUntil(dispatchWebhookEvent(ownerId, "agent.failed", { runId, chatId: run.chatId, code, message }));
     }
 
     throw err;
