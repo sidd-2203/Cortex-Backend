@@ -1,0 +1,54 @@
+---
+title: Errors
+description: Error shape and status codes
+---
+
+Every error response has the same envelope:
+
+```json
+{
+  "error": {
+    "code": "not_found",
+    "message": "Chat not found"
+  }
+}
+```
+
+`code` is the stable, machine-checkable part — branch on it, not on
+`message`, which is a human-readable string that can change wording
+without notice.
+
+## Status codes
+
+| Status | Meaning |
+| --- | --- |
+| `400` | The request body failed validation (`invalid_request`), or referenced something invalid — an unknown tool name (`unknown_tool`), input that fails that tool's own schema (`invalid_tool_input`), or an attachment that isn't ready (`attachment_not_ready`) |
+| `401` | Missing or invalid API key (`unauthorized`) |
+| `404` | The resource doesn't exist, or doesn't belong to the caller — these two cases are deliberately indistinguishable (`not_found`) |
+| `409` | A conflict with the resource's current state — most commonly `run_in_progress` (this chat already has an active run) |
+| `502` | Cortex failed to dispatch the background job itself (`dispatch_failed`) — a real, if rare, infrastructure hiccup. Safe to retry. |
+| `500` | An unexpected internal error (`internal_error`) |
+
+## Why 404, not 403
+
+A request for a chat that exists but belongs to someone else returns the
+same `404 not_found` as a chat that doesn't exist at all. This is
+deliberate: an authenticated caller shouldn't be able to distinguish "not
+yours" from "doesn't exist" by watching the status code.
+
+## Validation errors
+
+A `400` from malformed input includes the Zod validation issues so you can
+see exactly what was wrong, not just that something was:
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "Validation failed",
+    "issues": [
+      { "path": ["messages", 0, "content"], "message": "String must contain at least 1 character(s)" }
+    ]
+  }
+}
+```

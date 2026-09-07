@@ -1,19 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth as triggerAuth } from "@trigger.dev/sdk";
-import { requireUser } from "@/lib/auth";
+import { requireApiKey } from "@/lib/auth-api-key";
 import { prisma } from "@/lib/db";
 import { withApiError, NotFoundError } from "@/lib/api-error";
 import { newTraceId } from "@/lib/logger";
 import { serializeMessage } from "@/lib/serialize";
 import { encodeCursor, decodeCursor } from "@/lib/cursor";
 import { dispatchTurn } from "@/lib/agent/dispatch-turn";
-import {
-  SendTurnRequestSchema,
-  SendTurnResponseSchema,
-  CursorPageRequestSchema,
-  cursorPageResponseSchema,
-  MessageSchema,
-} from "@/contracts/chat";
+import { CursorPageRequestSchema, cursorPageResponseSchema, MessageSchema } from "@/contracts/chat";
+import { CreateMessageRequestSchema, CreateMessageResponseSchema } from "@/contracts/public-api";
 
 type Params = { params: Promise<{ chatId: string }> };
 
@@ -23,12 +17,13 @@ async function requireOwnedChat(chatId: string, ownerId: string) {
   return chat;
 }
 
+/** Conversation reads: this chat's messages, newest-first, cursor-paginated. */
 export async function GET(req: NextRequest, { params }: Params) {
   const { chatId } = await params;
   const traceId = newTraceId();
   return withApiError({ traceId, chatId }, async () => {
-    const user = await requireUser();
-    await requireOwnedChat(chatId, user.id);
+    const { ownerId } = await requireApiKey(req);
+    await requireOwnedChat(chatId, ownerId);
 
     const { searchParams } = new URL(req.url);
     const { cursor, limit } = CursorPageRequestSchema.parse({
@@ -37,18 +32,11 @@ export async function GET(req: NextRequest, { params }: Params) {
     });
     const decoded = cursor ? decodeCursor(cursor) : null;
 
-    // Newest-first for the initial load; the frontend reverses for display
-    // and walks `nextCursor` backwards as the user scrolls up.
     const messages = await prisma.message.findMany({
       where: {
         chatId,
         ...(decoded
-          ? {
-              OR: [
-                { createdAt: { lt: decoded.timestamp } },
-                { createdAt: decoded.timestamp, id: { lt: decoded.id } },
-              ],
-            }
+          ? { OR: [{ createdAt: { lt: decoded.timestamp } }, { createdAt: decoded.timestamp, id: { lt: decoded.id } }] }
           : {}),
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -69,43 +57,44 @@ export async function GET(req: NextRequest, { params }: Params) {
 }
 
 /**
- * Send-turn: validate → persist the user's message → dispatch a durable
- * Trigger.dev task → return a subscription the frontend uses to read the
- * response directly from Trigger.dev Realtime. This handler never waits on
- * the LLM completion — it dispatches and returns, which is what keeps it
- * comfortably inside Vercel's serverless function time limit regardless of
- * how long the actual response takes to stream.
+ * Message submission: append a message to an existing chat and dispatch a
+ * turn — the public-API equivalent of the first-party send-turn route,
+ * minus the Trigger.dev Realtime subscription details (those are an
+ * implementation detail of the first-party frontend, not part of this
+ * surface). Poll GET /api/v1/runs/:runId or register a webhook instead.
  */
 export async function POST(req: NextRequest, { params }: Params) {
   const { chatId } = await params;
   const traceId = newTraceId();
   return withApiError({ traceId, chatId }, async () => {
-    const user = await requireUser();
-    await requireOwnedChat(chatId, user.id);
+    const { ownerId } = await requireApiKey(req);
+    await requireOwnedChat(chatId, ownerId);
 
-    const input = SendTurnRequestSchema.parse(await req.json().catch(() => null));
+    const input = CreateMessageRequestSchema.parse(await req.json().catch(() => null));
 
     const dispatched = await dispatchTurn({
       chatId,
-      ownerId: user.id,
-      idempotencyKey: input.idempotencyKey,
-      content: input.content,
+      ownerId,
+      // A public-API caller has no client-generated idempotency key of its
+      // own to send — derived from the request's own content instead isn't
+      // safe (two genuinely different messages could collide), so each
+      // call here is its own dispatch. A caller that needs retry-safety
+      // should check GET /api/v1/runs/:runId for an in-flight run on this
+      // chat before retrying, same as the one-run-per-chat rule already
+      // enforces server-side.
+      idempotencyKey: crypto.randomUUID(),
+      content: [{ type: "text", text: input.content }],
       attachmentIds: input.attachmentIds,
     });
 
-    // Realtime access tokens are short-lived by design and never persisted
-    // — minted fresh here (and identically on the idempotent-retry path,
-    // since dispatchTurn returns the same triggerRunId either way).
-    const publicAccessToken = await triggerAuth.createPublicToken({
-      scopes: { read: { runs: [dispatched.triggerRunId] } },
-    });
+    const run = await prisma.agentRun.findUniqueOrThrow({ where: { id: dispatched.runId } });
 
-    const body = SendTurnResponseSchema.parse({
-      chatId,
-      messageId: dispatched.userMessageId,
+    const body = CreateMessageResponseSchema.parse({
+      id: dispatched.userMessageId,
       runId: dispatched.runId,
-      triggerRunId: dispatched.triggerRunId,
-      publicAccessToken,
+      chatId,
+      status: run.status,
+      createdAt: run.createdAt.toISOString(),
     });
     return NextResponse.json(body, { status: dispatched.isNew ? 201 : 200 });
   });

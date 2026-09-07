@@ -1,0 +1,140 @@
+---
+title: Webhooks
+description: Signed lifecycle events, delivered as they happen
+---
+
+Register a URL once and Cortex POSTs a signed payload to it every time
+something happens to one of your runs, instead of you polling for it.
+
+## Registering an endpoint
+
+```bash
+curl -X POST https://<your-backend>/api/v1/webhooks \
+  -H "Authorization: Bearer ctx_live_..." \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://your-server.com/webhooks/cortex"}'
+```
+
+```json
+{
+  "id": "wh_abc123",
+  "url": "https://your-server.com/webhooks/cortex",
+  "active": true,
+  "createdAt": "2026-09-07T12:00:00.000Z",
+  "secret": "whsec_9f2a1b..."
+}
+```
+
+`secret` is returned **exactly once**, at creation. Store it immediately —
+it's what you use to verify every delivery, and it can't be retrieved
+again after this response. If you lose it, remove the endpoint
+(`DELETE /v1/webhooks/{id}`) and register a new one.
+
+Every endpoint you register receives every event type below — there's no
+per-endpoint event filtering in this release.
+
+## Events
+
+| Event | Fires when |
+| --- | --- |
+| `agent.started` | A chat turn begins running |
+| `agent.completed` | A chat turn finishes — including one that was stopped partway through (`data.status` is `COMPLETE` or `CANCELLED`) |
+| `agent.failed` | A chat turn ends in an actual error |
+| `tool.completed` | Any tool call settles, successfully or not — fired for both agent-invoked tool calls and direct `/v1/chats/{chatId}/tools` calls |
+
+## Payload
+
+Every delivery has the same envelope:
+
+```json
+{
+  "event": "agent.completed",
+  "createdAt": "2026-09-07T12:03:41.000Z",
+  "data": {
+    "runId": "run_abc123",
+    "chatId": "chat_xyz",
+    "status": "COMPLETE",
+    "messageId": "msg_def456"
+  }
+}
+```
+
+`data`'s shape depends on the event — `agent.started` and `agent.failed`
+carry `runId`/`chatId` (plus `code`/`message` for a failure);
+`tool.completed` additionally carries `toolName`, `status`, `cost`, and
+`durationMs`.
+
+## Verifying a delivery
+
+Every request carries two headers:
+
+```
+X-Cortex-Event: agent.completed
+X-Cortex-Signature: t=1757246621,v1=5257a869...
+```
+
+`v1` is an HMAC-SHA256 of `"{t}.{raw request body}"`, keyed with your
+endpoint's secret — the same scheme Stripe uses, and for the same reason:
+signing the timestamp alongside the body means a captured (signature,
+body) pair can't be replayed indefinitely if you also reject stale
+timestamps.
+
+<CodeGroup>
+```ts Node.js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function verify(rawBody: string, header: string, secret: string): boolean {
+  const [tPart, v1Part] = header.split(",");
+  const timestamp = tPart?.split("=")[1];
+  const signature = v1Part?.split("=")[1];
+  if (!timestamp || !signature) return false;
+
+  // Reject anything older than 5 minutes — real replay protection, not
+  // just "is this from Cortex."
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) return false;
+
+  const expected = createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest("hex");
+
+  return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+```
+```py Python
+import hashlib
+import hmac
+import time
+
+def verify(raw_body: bytes, header: str, secret: str) -> bool:
+    parts = dict(p.split("=", 1) for p in header.split(","))
+    timestamp, signature = parts.get("t"), parts.get("v1")
+    if not timestamp or not signature:
+        return False
+
+    if abs(time.time() - int(timestamp)) > 300:
+        return False
+
+    expected = hmac.new(
+        secret.encode(), f"{timestamp}.{raw_body.decode()}".encode(), hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(signature, expected)
+```
+</CodeGroup>
+
+Use the **raw** request body for this — parse it into JSON only after the
+signature checks out, since re-serializing a parsed object isn't
+guaranteed to byte-for-byte match what was signed.
+
+## Delivery guarantees
+
+Delivery is **fire-and-forget**: one POST attempt per event, a 5-second
+timeout, no retry. If your endpoint is down or slow, that delivery is
+lost — it will not be attempted again. Every attempt (successful or not)
+is logged server-side, but there's no retry queue behind it in this
+release.
+
+If your integration needs guaranteed delivery, treat `GET /v1/runs/{runId}`
+as the source of truth and use webhooks as a low-latency notification
+that it's worth checking — not as the only way you'll ever find out a run
+finished.

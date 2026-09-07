@@ -4,6 +4,7 @@ import { logger } from "@/lib/logger";
 import { toolRegistry } from "@/lib/tools/registry";
 import { requireSufficientCredits, settleToolCharge, InsufficientCreditsError } from "@/lib/credits/ledger";
 import { requestApproval } from "@/lib/waitpoints/approval";
+import { dispatchWebhookEvent } from "@/lib/webhooks/dispatch";
 import type { ToolExecutionContext } from "@/contracts/tools";
 import type { ToolUseBlock, ToolResultBlock } from "@/contracts/content-blocks";
 import type { ToolStreamEvent } from "@/contracts/tool-stream";
@@ -174,6 +175,15 @@ export async function executeToolCall(
       });
     }
   }
+
+  void dispatchWebhookEvent(ctx.ownerId, "tool.completed", {
+    runId: ctx.runId,
+    chatId: ctx.chatId,
+    toolName: call.name,
+    status,
+    cost: status === "SUCCEEDED" ? cost : 0,
+    durationMs,
+  });
 
   const toolResultBlock: ToolResultBlock = {
     type: "tool_result",

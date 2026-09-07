@@ -1,0 +1,68 @@
+---
+title: Long-Running Runs
+description: Why every action here is asynchronous, and how to wait for one
+---
+
+An image generation can take a couple of minutes. A video merge, longer.
+Holding an HTTP request open for that long is fragile — most proxies and
+load balancers will kill it well before then, and Cortex's own backend
+(Vercel serverless functions) is built around never doing that even
+internally: every entry point dispatches a durable background job and
+returns immediately.
+
+## What "async" means here
+
+Three endpoints start something that takes real time:
+
+- `POST /v1/chats/{chatId}/messages`
+- `POST /v1/chat/completions`
+- `POST /v1/chats/{chatId}/tools`
+
+Every one of them responds **before the work is done**, with a body that
+always includes a run `id` and its current `status`:
+
+```json
+{
+  "id": "run_abc123",
+  "chatId": "chat_xyz",
+  "status": "QUEUED",
+  "createdAt": "2026-09-07T12:00:00.000Z"
+}
+```
+
+`status` moves through `QUEUED` → `WORKING` (possibly pausing at `WAITING`
+or `STOPPING`) → a terminal state: `COMPLETE`, `FAILED`, or `CANCELLED`.
+
+## Finding out when it's done
+
+You have two options, and they aren't mutually exclusive:
+
+<Tabs>
+  <Tab title="Poll">
+    ```bash
+    curl https://<your-backend>/api/v1/runs/run_abc123 \
+      -H "Authorization: Bearer ctx_live_..."
+    ```
+
+    Keep checking `status` until it's terminal. For a chat turn, the
+    response's `message` field holds the assistant's reply once `status`
+    is `COMPLETE`. For a direct tool call, `message` is always `null` —
+    look at `tools` instead, which carries the invocation's own `output`.
+
+    A reasonable interval is every 2–3 seconds for a chat turn, or every
+    5–10 seconds for a tool call you know involves image/video generation.
+  </Tab>
+  <Tab title="Webhooks">
+    Register a URL once (see **[Webhooks](/webhooks)**) and get a signed
+    POST the moment a run starts, finishes, fails, or a tool call
+    completes — no polling loop to write or tune. This is the better fit
+    for anything that isn't a quick interactive request.
+  </Tab>
+</Tabs>
+
+## Timeouts
+
+A chat turn can run up to 15 minutes server-side (enough room for the LLM
+round trips around a slow tool call). A direct tool call is capped at 5
+minutes. If a run is still `QUEUED` or `WORKING` well past that, something
+has gone wrong — check `error` once it lands in a terminal state.

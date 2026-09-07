@@ -1,0 +1,47 @@
+---
+title: Introduction
+description: The public REST API for Cortex
+---
+
+Cortex is an AI agent that holds a conversation and, along the way, can
+call real tools — cropping an image, merging videos, generating or editing
+an image with GPT Image 2 (via Magica). The public API gives you
+programmatic access to the same conversations, runs, and tools the Cortex
+app itself uses.
+
+## What you can do
+
+<CardGroup cols={2}>
+  <Card title="Message submission" icon="message">
+    Append a message to an existing conversation and get the agent's reply.
+  </Card>
+  <Card title="Chat completions" icon="bolt">
+    An OpenAI-completions-shaped entry point — start a new conversation or
+    continue one with a single call.
+  </Card>
+  <Card title="Direct tool execution" icon="wrench">
+    Call `crop_image`, `merge_videos`, `generate_image`, or `edit_image`
+    directly, without going through the LLM.
+  </Card>
+  <Card title="Webhooks" icon="webhook">
+    Get notified the moment a run starts, finishes, fails, or a tool call
+    completes — instead of polling.
+  </Card>
+</CardGroup>
+
+## The one thing to understand first
+
+Every action that takes real time — a chat turn, a direct tool call — is
+**asynchronous**. The request that starts it returns almost immediately
+with a run id and a `status` of `QUEUED`; the actual work happens in the
+background. Read **[Long-Running Runs](/long-running-runs)** before you
+build against this — it explains why, and the two ways to find out when a
+run is actually done.
+
+## Base URL
+
+```
+https://<your-deployed-backend>/api/v1
+```
+
+Every request needs an API key — see **[Authentication](/authentication)**.

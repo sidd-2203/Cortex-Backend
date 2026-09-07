@@ -38,9 +38,11 @@ model User {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  chats        Chat[]
-  attachments  Attachment[]
-  creditLedger CreditLedger[]
+  chats            Chat[]
+  attachments      Attachment[]
+  creditLedger     CreditLedger[]
+  apiKeys          ApiKey[]
+  webhookEndpoints WebhookEndpoint[]
 
   @@map("users")
 }
@@ -278,4 +280,72 @@ model Waitpoint {
 
   @@index([runId])
   @@map("waitpoints")
+}
+
+// ---------------------------------------------------------------------------
+// Public API (bonus scope): API keys, and outbound webhooks
+// ---------------------------------------------------------------------------
+
+/// A developer credential for the public REST API — distinct from the
+/// Clerk session tokens the first-party frontend uses, since a script or
+/// server calling the API has no browser session to hold one. Script-issued
+/// only (see scripts/mint-api-key.ts) — no self-serve UI in this scope.
+model ApiKey {
+  id         String    @id @default(cuid())
+  ownerId    String
+  owner      User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  /// A human label, e.g. "prod key" — purely for the owner's own reference.
+  name       String
+  /// First 8 chars of the real key, kept in the clear so a listing can show
+  /// "ctx_live_a1b2c3d4..." without ever re-exposing the full secret.
+  keyPrefix  String
+  /// SHA-256 of the full key. The key itself is shown exactly once, at
+  /// creation, and is never stored or retrievable after that — this is what
+  /// gets compared against on every request instead.
+  hashedKey  String    @unique
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  @@index([ownerId])
+  @@map("api_keys")
+}
+
+/// A URL an owner has registered to receive signed lifecycle events
+/// (agent.started/completed/failed, tool.completed — see
+/// src/lib/webhooks/dispatch.ts). One owner can register several; each
+/// receives every event type in this scope, and each has its own signing
+/// secret so a leaked secret only compromises that one endpoint.
+model WebhookEndpoint {
+  id        String    @id @default(cuid())
+  ownerId   String
+  owner     User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  url       String
+  /// Used as the HMAC-SHA256 key for the X-Cortex-Signature header. Shown
+  /// once, at creation, same as an ApiKey's full value.
+  secret    String
+  active    Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  deliveries WebhookDelivery[]
+
+  @@index([ownerId])
+  @@map("webhook_endpoints")
+}
+
+/// One delivery attempt. Fire-and-forget by design (see the dispatch
+/// decision) — this row is the audit trail for a failed delivery, not a
+/// retry queue's input; there is no scheduled retry job reading it.
+model WebhookDelivery {
+  id         String          @id @default(cuid())
+  endpointId String
+  endpoint   WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  event      String
+  payload    Json
+  statusCode Int?
+  error      String?
+  createdAt  DateTime        @default(now())
+
+  @@index([endpointId, createdAt])
+  @@map("webhook_deliveries")
 }

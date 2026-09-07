@@ -1,0 +1,51 @@
+---
+title: Authentication
+description: API keys and how to use them
+---
+
+The public API authenticates with an API key, not the session cookie or
+Clerk token the Cortex web app uses — a script or server calling this API
+has no browser session to hold one.
+
+## Getting a key
+
+Keys are minted with a script, not a settings page, in this release:
+
+```bash
+npx tsx scripts/mint-api-key.ts <your-user-id-or-email> [a label]
+```
+
+This prints the full key **exactly once**:
+
+```
+API key created for you@example.com (user_abc123):
+
+  ctx_live_9f2a1b...
+
+This is shown once — it is not stored anywhere retrievable. Save it now.
+Use it as: Authorization: Bearer <key>
+```
+
+Only its SHA-256 hash and its first 16 characters (for display in a future
+listing) are ever persisted — if you lose the key, mint a new one.
+
+## Using it
+
+Every request needs an `Authorization` header:
+
+```bash
+curl https://<your-backend>/api/v1/chats \
+  -H "Authorization: Bearer ctx_live_9f2a1b..."
+```
+
+A missing or invalid key gets a `401`:
+
+```json
+{ "error": { "code": "unauthorized", "message": "Unauthorized" } }
+```
+
+## Scope
+
+A key acts as its owner — every request only ever sees and touches that
+user's own chats, runs, and webhook endpoints. There's no cross-account
+access, and no separate "organization" concept in this release.

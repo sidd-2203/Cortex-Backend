@@ -1,0 +1,38 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Cortex API",
+  "colors": {
+    "primary": "#7c5cff",
+    "light": "#9c85ff",
+    "dark": "#6a4ce0"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": ["introduction", "authentication", "long-running-runs", "errors"]
+      },
+      {
+        "group": "API Reference",
+        "openapi": "openapi.yaml"
+      },
+      {
+        "group": "Webhooks",
+        "pages": ["webhooks"]
+      }
+    ]
+  },
+  "api": {
+    "openapi": "openapi.yaml"
+  },
+  "navbar": {
+    "links": [
+      { "label": "Cortex App", "href": "https://cortex.example.com" }
+    ]
+  },
+  "footer": {
+    "socials": {}
+  }
+}

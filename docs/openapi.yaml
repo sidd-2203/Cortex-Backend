@@ -1,0 +1,521 @@
+openapi: 3.1.0
+info:
+  title: Cortex API
+  version: "1"
+  description: |
+    The public REST API for Cortex — an AI agent that can hold a conversation
+    and call real tools (image cropping, video merging, AI image generation/
+    editing) along the way. Every long-running action (a chat turn, a direct
+    tool call) is dispatched asynchronously: the request that starts it
+    returns almost immediately with a run id, and you either poll
+    `GET /v1/runs/{runId}` or register a webhook to find out when it's done.
+    See **Long-Running Runs** for why, and **Webhooks** for delivery details.
+servers:
+  - url: https://api.cortex.example.com/api/v1
+    description: Production (replace with your deployed backend's own origin)
+security:
+  - bearerAuth: []
+
+paths:
+  /chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: Create a chat completion
+      description: |
+        Shaped like OpenAI's chat-completions request so an existing
+        OpenAI-compatible client needs minimal changes to point at Cortex —
+        but this is **async**, not a stateless multi-turn replay. Only the
+        last message's `content` becomes the new turn; conversation history
+        already lives server-side, keyed by `chatId`. Omit `chatId` to start
+        a brand-new conversation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCompletionRequest"
+      responses:
+        "202":
+          description: The turn was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateCompletionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /chats:
+    get:
+      operationId: listChats
+      summary: List conversations
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of the caller's chats, newest-first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /chats/{chatId}/messages:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    get:
+      operationId: listMessages
+      summary: Read a conversation's messages
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of this chat's messages, newest-first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createMessage
+      summary: Submit a message to a conversation
+      description: |
+        Appends a message to an existing chat and dispatches a turn — the
+        agent will read this along with the chat's prior history. Returns
+        immediately; poll `GET /v1/runs/{runId}` or use a webhook to get the
+        result.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMessageRequest"
+      responses:
+        "201":
+          description: A new turn was dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: This chat already has an active run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /chats/{chatId}/tools:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    post:
+      operationId: runTool
+      summary: Run a Magica tool directly
+      description: |
+        Bypasses the LLM entirely — invokes one named tool with the given
+        input. No approval gate: calling this endpoint at all *is* the
+        approval, since you're naming the exact tool and arguments yourself
+        rather than letting a model decide. Credits are still charged
+        normally. Available tools: `crop_image`, `merge_videos`,
+        `generate_image`, `edit_image`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunToolRequest"
+      responses:
+        "202":
+          description: The tool call was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunToolResponse"
+        "400":
+          description: Unknown tool name, or input that fails the tool's own schema.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: This chat already has an active run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /runs/{runId}:
+    get:
+      operationId: getRun
+      summary: Get a run's status and result
+      description: |
+        The poll target for every async entry point (message submission,
+        chat completions, direct tool execution). `message` is the
+        assistant's message once it exists — null for a still-running turn,
+        or for a direct tool call (which has no message at all; `tools` is
+        what carries its result there).
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The run's current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /webhooks:
+    get:
+      operationId: listWebhooks
+      summary: List registered webhook endpoints
+      responses:
+        "200":
+          description: The caller's registered endpoints. Secrets are never re-shown.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListWebhooksResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createWebhook
+      summary: Register a webhook endpoint
+      description: |
+        Registers a URL to receive signed lifecycle events. The signing
+        secret is generated here and returned **exactly once** — store it
+        immediately, it cannot be retrieved again. See **Webhooks** for the
+        signature-verification scheme.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookRequest"
+      responses:
+        "201":
+          description: The endpoint was registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateWebhookResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /webhooks/{id}:
+    delete:
+      operationId: deleteWebhook
+      summary: Remove a webhook endpoint
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: The endpoint was removed. No further deliveries will be attempted to it.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: "ctx_live_..."
+      description: An API key minted via `scripts/mint-api-key.ts` — see **Authentication**.
+
+  parameters:
+    ChatId:
+      name: chatId
+      in: path
+      required: true
+      schema:
+        type: string
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque pagination cursor from a previous page's `nextCursor`.
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 30
+
+  responses:
+    BadRequest:
+      description: The request failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The resource doesn't exist, or doesn't belong to the caller.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: "not_found"
+            message:
+              type: string
+              example: "Chat not found"
+          required: [code, message]
+      required: [error]
+
+    RunStatus:
+      type: string
+      enum: [QUEUED, THINKING, WORKING, WAITING, STOPPING, COMPLETE, FAILED, CANCELLED]
+
+    ContentBlock:
+      description: One block of a message's ordered content — text, a tool call, its result, or an attachment.
+      type: object
+
+    Message:
+      type: object
+      properties:
+        id: { type: string }
+        chatId: { type: string }
+        runId: { type: string, nullable: true }
+        role: { type: string, enum: [USER, ASSISTANT, SYSTEM, TOOL] }
+        status: { type: string, enum: [QUEUED, STREAMING, COMPLETE, FAILED, CANCELLED] }
+        content:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContentBlock"
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, chatId, role, status, content, createdAt, updatedAt]
+
+    ChatSummary:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        pinned: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+      required: [id, title, pinned, createdAt, updatedAt]
+
+    ChatListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatSummary"
+        nextCursor: { type: string, nullable: true }
+      required: [items, nextCursor]
+
+    MessageListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        nextCursor: { type: string, nullable: true }
+      required: [items, nextCursor]
+
+    CompletionMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [user]
+        content:
+          type: string
+      required: [role, content]
+
+    CreateCompletionRequest:
+      type: object
+      properties:
+        chatId:
+          type: string
+          description: Omit to start a new conversation.
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/CompletionMessage"
+      required: [messages]
+
+    CreateCompletionResponse:
+      type: object
+      properties:
+        id: { type: string, description: "The run id." }
+        object:
+          type: string
+          enum: ["chat.completion.queued"]
+        chatId: { type: string }
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        createdAt: { type: string, format: date-time }
+      required: [id, object, chatId, status, createdAt]
+
+    CreateMessageRequest:
+      type: object
+      properties:
+        content:
+          type: string
+        attachmentIds:
+          type: array
+          items:
+            type: string
+          default: []
+      required: [content]
+
+    CreateMessageResponse:
+      type: object
+      properties:
+        id: { type: string, description: "The created message's id." }
+        runId: { type: string }
+        chatId: { type: string }
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        createdAt: { type: string, format: date-time }
+      required: [id, runId, chatId, status, createdAt]
+
+    RunToolRequest:
+      type: object
+      properties:
+        toolName:
+          type: string
+          example: "generate_image"
+        input:
+          description: The tool's own input shape — see each tool's schema in the Cortex app, or infer it from a 400 response's message.
+      required: [toolName, input]
+
+    RunToolResponse:
+      type: object
+      properties:
+        id: { type: string, description: "The run id." }
+        chatId: { type: string }
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        createdAt: { type: string, format: date-time }
+      required: [id, chatId, status, createdAt]
+
+    ToolInvocationSummary:
+      type: object
+      properties:
+        id: { type: string }
+        toolName: { type: string }
+        input: {}
+        output: { nullable: true }
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED]
+        cost: { type: integer }
+        durationMs: { type: integer, nullable: true }
+      required: [id, toolName, input, output, status, cost, durationMs]
+
+    RunStatusResponse:
+      type: object
+      properties:
+        id: { type: string }
+        chatId: { type: string }
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        model: { type: string, nullable: true }
+        error: { nullable: true }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time, nullable: true }
+        endedAt: { type: string, format: date-time, nullable: true }
+        message:
+          allOf:
+            - $ref: "#/components/schemas/Message"
+          nullable: true
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolInvocationSummary"
+      required: [id, chatId, status, model, error, createdAt, startedAt, endedAt, message, tools]
+
+    CreateWebhookRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+      required: [url]
+
+    WebhookEndpoint:
+      type: object
+      properties:
+        id: { type: string }
+        url: { type: string }
+        active: { type: boolean }
+        createdAt: { type: string, format: date-time }
+      required: [id, url, active, createdAt]
+
+    CreateWebhookResponse:
+      allOf:
+        - $ref: "#/components/schemas/WebhookEndpoint"
+        - type: object
+          properties:
+            secret:
+              type: string
+              description: Shown once. Use it to verify the X-Cortex-Signature header — see the Webhooks guide.
+          required: [secret]
+
+    ListWebhooksResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookEndpoint"
+      required: [items]

@@ -5,6 +5,7 @@ import { toolRegistry } from "@/lib/tools/registry";
 import { ensureToolsRegistered } from "@/lib/tools/bootstrap";
 import { executeToolCall, type TurnApprovalState } from "./execute-tool-call";
 import { getSkillsRegistry } from "@/lib/skills/registry";
+import { dispatchWebhookEvent } from "@/lib/webhooks/dispatch";
 import type { MessageContent } from "@/contracts/content-blocks";
 import type { ToolStreamEvent } from "@/contracts/tool-stream";
 import type { Prisma } from "../../../prisma/generated/prisma/client";
@@ -99,6 +100,10 @@ export async function runTurn(
     where: { id: runId },
     data: { status: "WORKING", startedAt: new Date() },
   });
+
+  // Fire-and-forget by design (see dispatch.ts) — never awaited, never
+  // allowed to affect the turn it's reporting on.
+  void dispatchWebhookEvent(ownerId, "agent.started", { runId, chatId: run.chatId });
 
   const assistantMessage = await prisma.message.create({
     data: { chatId: run.chatId, runId, role: "ASSISTANT", status: "STREAMING", content: [] },
@@ -205,6 +210,13 @@ export async function runTurn(
         },
       }),
     ]);
+
+    void dispatchWebhookEvent(ownerId, "agent.completed", {
+      runId,
+      chatId: run.chatId,
+      status: cancelled ? "CANCELLED" : "COMPLETE",
+      messageId: assistantMessage.id,
+    });
   } catch (err) {
     // Persisted structured, not as a bare string — the UI has to be able to
     // explain a failed turn on its own ("rate limited, try again shortly"
@@ -224,6 +236,9 @@ export async function runTurn(
         data: { status: "FAILED", endedAt: new Date(), error: { code, message } },
       }),
     ]);
+
+    void dispatchWebhookEvent(ownerId, "agent.failed", { runId, chatId: run.chatId, code, message });
+
     throw err;
   }
 }
