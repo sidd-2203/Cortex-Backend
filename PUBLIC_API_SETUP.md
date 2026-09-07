@@ -24,12 +24,10 @@ deploys automatically on push after that.
 
 ## Before shipping
 
-Two placeholders need real values:
+Both real URLs are set, no placeholders left:
 
-- **`docs/docs.json`** — `navbar.links` points at
-  `https://cortex.example.com`. Replace with the deployed frontend's URL,
-  or remove the link.
-- **`docs/openapi.yaml`** — the `servers` entry points at
-  `https://api.cortex.example.com/api/v1`. Replace with the deployed
-  backend's actual origin, so the API reference's "Try it" panel hits the
-  real API.
+- **`docs/openapi.yaml`**'s `servers` entry and every code example across
+  the guide pages point at `https://cortex-backend-peach.vercel.app` — the
+  API reference's "Try it" panel hits the real API.
+- **`docs/docs.json`**'s `navbar.links` points at
+  `https://cortex-frontend-kohl.vercel.app` — the deployed frontend app.

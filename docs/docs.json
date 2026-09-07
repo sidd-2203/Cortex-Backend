@@ -29,7 +29,7 @@
   },
   "navbar": {
     "links": [
-      { "label": "Cortex App", "href": "https://cortex.example.com" }
+      { "label": "Cortex App", "href": "https://cortex-frontend-kohl.vercel.app" }
     ]
   },
   "footer": {

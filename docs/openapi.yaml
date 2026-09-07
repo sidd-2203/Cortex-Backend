@@ -11,8 +11,8 @@ info:
     `GET /v1/runs/{runId}` or register a webhook to find out when it's done.
     See **Long-Running Runs** for why, and **Webhooks** for delivery details.
 servers:
-  - url: https://api.cortex.example.com/api/v1
-    description: Production (replace with your deployed backend's own origin)
+  - url: https://cortex-backend-peach.vercel.app/api/v1
+    description: Production
 security:
   - bearerAuth: []
 

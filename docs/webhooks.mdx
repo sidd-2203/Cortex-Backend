@@ -9,7 +9,7 @@ something happens to one of your runs, instead of you polling for it.
 ## Registering an endpoint
 
 ```bash
-curl -X POST https://<your-backend>/api/v1/webhooks \
+curl -X POST https://cortex-backend-peach.vercel.app/api/v1/webhooks \
   -H "Authorization: Bearer ctx_live_..." \
   -H "Content-Type: application/json" \
   -d '{"url": "https://your-server.com/webhooks/cortex"}'
