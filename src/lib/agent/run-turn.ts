@@ -24,6 +24,10 @@ const HISTORY_LIMIT = 50;
 // loudly.
 const MAX_TOOL_ITERATIONS = 6;
 
+export interface RunTurnOptions {
+  isFinalAttempt: boolean;
+}
+
 /**
  * Cooperative cancellation: POST /api/runs/[runId]/cancel flips the row to
  * STOPPING and this is where the task notices. Deliberately not
@@ -50,6 +54,7 @@ export async function runTurn(
   runId: string,
   onTextDelta?: (delta: string) => void,
   onToolEvent?: (event: ToolStreamEvent) => void,
+  options: RunTurnOptions = { isFinalAttempt: true },
 ): Promise<void> {
   ensureToolsRegistered();
   const run = await prisma.agentRun.findUniqueOrThrow({
@@ -105,9 +110,18 @@ export async function runTurn(
   // allowed to affect the turn it's reporting on.
   void dispatchWebhookEvent(ownerId, "agent.started", { runId, chatId: run.chatId });
 
-  const assistantMessage = await prisma.message.create({
-    data: { chatId: run.chatId, runId, role: "ASSISTANT", status: "STREAMING", content: [] },
+  const previousAssistantMessage = await prisma.message.findFirst({
+    where: { chatId: run.chatId, runId, role: "ASSISTANT" },
+    orderBy: { createdAt: "desc" },
   });
+  const assistantMessage = previousAssistantMessage
+    ? await prisma.message.update({
+        where: { id: previousAssistantMessage.id },
+        data: { status: "STREAMING", content: [] },
+      })
+    : await prisma.message.create({
+        data: { chatId: run.chatId, runId, role: "ASSISTANT", status: "STREAMING", content: [] },
+      });
 
   const contentBlocks: MessageContent = [];
   let toolSequence = 0;
@@ -226,18 +240,20 @@ export async function runTurn(
     const message = err instanceof Error ? err.message : "Agent turn failed";
     logger.error(message, { runId, chatId: run.chatId, messageId: assistantMessage.id, code });
 
-    await prisma.$transaction([
-      prisma.message.update({
-        where: { id: assistantMessage.id },
-        data: { status: "FAILED", content: asJsonInput(contentBlocks) },
-      }),
-      prisma.agentRun.update({
-        where: { id: runId },
-        data: { status: "FAILED", endedAt: new Date(), error: { code, message } },
-      }),
-    ]);
+    if (options.isFinalAttempt) {
+      await prisma.$transaction([
+        prisma.message.update({
+          where: { id: assistantMessage.id },
+          data: { status: "FAILED", content: asJsonInput(contentBlocks) },
+        }),
+        prisma.agentRun.update({
+          where: { id: runId },
+          data: { status: "FAILED", endedAt: new Date(), error: { code, message } },
+        }),
+      ]);
 
-    void dispatchWebhookEvent(ownerId, "agent.failed", { runId, chatId: run.chatId, code, message });
+      void dispatchWebhookEvent(ownerId, "agent.failed", { runId, chatId: run.chatId, code, message });
+    }
 
     throw err;
   }

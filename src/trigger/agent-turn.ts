@@ -21,7 +21,7 @@ export const agentTurnTask = task({
   // beyond that one call: the LLM round trips before and after it, and a
   // turn can make more than one such call before finishing.
   maxDuration: 900,
-  run: async (payload: { agentRunId: string }) => {
+  run: async (payload: { agentRunId: string }, { ctx }) => {
     const deltaQueue = new PushQueue<string>();
     const toolQueue = new PushQueue<string>();
     const [delta, tool] = await Promise.all([
@@ -36,6 +36,7 @@ export const agentTurnTask = task({
         // Serialized to JSON — the stream itself only carries strings, same
         // as the delta stream; the frontend parses each part back out.
         (event) => toolQueue.push(JSON.stringify(event)),
+        { isFinalAttempt: ctx.attempt.number >= (ctx.run.maxAttempts ?? 1) },
       );
     } finally {
       deltaQueue.close();
