@@ -2,9 +2,20 @@ import { tasks } from "@trigger.dev/sdk";
 import { prisma } from "@/lib/db";
 import { ApiError } from "@/lib/api-error";
 import type { AttachmentBlock, ContentBlock } from "@/contracts/content-blocks";
-import type { Prisma } from "../../../prisma/generated/prisma/client";
+import { Prisma } from "../../../prisma/generated/prisma/client";
 
 const NON_TERMINAL_RUN_STATUSES = ["QUEUED", "THINKING", "WORKING", "WAITING", "STOPPING"] as const;
+const ONE_ACTIVE_RUN_INDEX = "one_active_run_per_chat";
+
+/** Checks a P2002's `meta` for the one_active_run_per_chat index, under either error shape Prisma is known to use for it (see the catch block in dispatchTurn). */
+function isOneActiveRunViolation(err: Prisma.PrismaClientKnownRequestError): boolean {
+  const meta = err.meta as
+    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } }
+    | undefined;
+  if (typeof meta?.target === "string" && meta.target.includes(ONE_ACTIVE_RUN_INDEX)) return true;
+  if (Array.isArray(meta?.target) && meta.target.includes(ONE_ACTIVE_RUN_INDEX)) return true;
+  return meta?.driverAdapterError?.cause?.constraint?.index === ONE_ACTIVE_RUN_INDEX;
+}
 
 /** First text block, single line, capped — good enough for a list label. */
 function titleFromContent(content: { type: string; text?: string }[]): string | null {
@@ -101,30 +112,53 @@ export async function dispatchTurn(params: {
   const attachmentBlocks = await resolveAttachmentBlocks(params.attachmentIds ?? [], ownerId);
   const content: ContentBlock[] = [...params.content, ...attachmentBlocks];
 
-  const { userMessage, run } = await prisma.$transaction(async (tx) => {
-    const isFirstMessage = (await tx.message.count({ where: { chatId } })) === 0;
-    const title = isFirstMessage ? titleFromContent(params.content) : null;
+  let userMessage: Awaited<ReturnType<typeof prisma.message.create>>;
+  let run: Awaited<ReturnType<typeof prisma.agentRun.create>>;
+  try {
+    ({ userMessage, run } = await prisma.$transaction(async (tx) => {
+      const isFirstMessage = (await tx.message.count({ where: { chatId } })) === 0;
+      const title = isFirstMessage ? titleFromContent(params.content) : null;
 
-    const userMessage = await tx.message.create({
-      data: { chatId, role: "USER", status: "COMPLETE", content: content as unknown as Prisma.InputJsonValue },
-    });
-
-    if (attachmentBlocks.length > 0) {
-      const { count } = await tx.attachment.updateMany({
-        where: { id: { in: attachmentBlocks.map((b) => b.attachmentId) }, messageId: null },
-        data: { messageId: userMessage.id },
+      const userMessage = await tx.message.create({
+        data: { chatId, role: "USER", status: "COMPLETE", content: content as unknown as Prisma.InputJsonValue },
       });
-      if (count !== attachmentBlocks.length) {
-        throw new ApiError(409, "attachment_race", "One or more attachments were claimed by another message");
-      }
-    }
 
-    const run = await tx.agentRun.create({
-      data: { chatId, idempotencyKey, status: "QUEUED" },
-    });
-    await tx.chat.update({ where: { id: chatId }, data: title ? { title } : {} });
-    return { userMessage, run };
-  });
+      if (attachmentBlocks.length > 0) {
+        const { count } = await tx.attachment.updateMany({
+          where: { id: { in: attachmentBlocks.map((b) => b.attachmentId) }, messageId: null },
+          data: { messageId: userMessage.id },
+        });
+        if (count !== attachmentBlocks.length) {
+          throw new ApiError(409, "attachment_race", "One or more attachments were claimed by another message");
+        }
+      }
+
+      const run = await tx.agentRun.create({
+        data: { chatId, idempotencyKey, status: "QUEUED" },
+      });
+      await tx.chat.update({ where: { id: chatId }, data: title ? { title } : {} });
+      return { userMessage, run };
+    }));
+  } catch (err) {
+    // The app-level activeRun check above is a plain read-then-act — two
+    // truly concurrent requests can both pass it before either has
+    // committed a row, which is exactly what the partial unique index
+    // "one_active_run_per_chat" (migrations/20260905132637) exists to
+    // backstop atomically at the database itself. Without this catch, the
+    // loser of that race got Postgres's raw unique-violation error instead
+    // of the same clean 409 the non-concurrent path already returns —
+    // confirmed live (two genuinely simultaneous POSTs to the same chat,
+    // one got 201, the other a bare 500) and then confirmed again against
+    // the actual thrown error's shape directly: with the pg driver adapter
+    // this project uses, the constraint name isn't in the usual
+    // `meta.target` — it's nested under `meta.driverAdapterError.cause
+    // .constraint.index`. Checking both rather than only the shape this
+    // environment happens to use today.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002" && isOneActiveRunViolation(err)) {
+      throw new ApiError(409, "run_in_progress", "This chat already has an active run");
+    }
+    throw err;
+  }
 
   let handle: Awaited<ReturnType<typeof tasks.trigger>>;
   try {
