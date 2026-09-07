@@ -3,9 +3,10 @@ import { logger } from "@/lib/logger";
 import { streamChatCompletion, OpenRouterError, type OpenRouterMessage, type OpenRouterToolCall } from "@/lib/openrouter";
 import { toolRegistry } from "@/lib/tools/registry";
 import { ensureToolsRegistered } from "@/lib/tools/bootstrap";
-import { executeToolCall } from "./execute-tool-call";
+import { executeToolCall, type TurnApprovalState } from "./execute-tool-call";
 import { getSkillsRegistry } from "@/lib/skills/registry";
 import type { MessageContent } from "@/contracts/content-blocks";
+import type { ToolStreamEvent } from "@/contracts/tool-stream";
 import type { Prisma } from "../../../prisma/generated/prisma/client";
 
 // Content blocks are already validated by ContentBlockSchema wherever they're
@@ -23,6 +24,19 @@ const HISTORY_LIMIT = 50;
 const MAX_TOOL_ITERATIONS = 6;
 
 /**
+ * Cooperative cancellation: POST /api/runs/[runId]/cancel flips the row to
+ * STOPPING and this is where the task notices. Deliberately not
+ * Trigger.dev's own runs.cancel() — a hard kill mid-tool-call would strand
+ * a Magica job we'd already paid for and lose the partial answer. Checked
+ * only between steps, so the worst case is one in-flight tool call (or one
+ * model response) finishing before the turn winds down.
+ */
+async function isStopRequested(runId: string): Promise<boolean> {
+  const run = await prisma.agentRun.findUnique({ where: { id: runId }, select: { status: true } });
+  return run?.status === "STOPPING";
+}
+
+/**
  * Executes one agent turn: loads recent chat history, runs the model <->
  * tool loop against OpenRouter Free, persists the assistant message (as
  * ordered content blocks — text and any tool_use/tool_result pairs), and
@@ -34,6 +48,7 @@ const MAX_TOOL_ITERATIONS = 6;
 export async function runTurn(
   runId: string,
   onTextDelta?: (delta: string) => void,
+  onToolEvent?: (event: ToolStreamEvent) => void,
 ): Promise<void> {
   ensureToolsRegistered();
   const run = await prisma.agentRun.findUniqueOrThrow({
@@ -92,9 +107,18 @@ export async function runTurn(
   const contentBlocks: MessageContent = [];
   let toolSequence = 0;
   let finalModel: string | null = null;
+  let cancelled = false;
+  // One object for the whole turn — "approve all" flips it once and every
+  // later paid call in this loop skips its gate.
+  const approvalState: TurnApprovalState = { approveAll: false };
 
   try {
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+      if (await isStopRequested(runId)) {
+        cancelled = true;
+        break;
+      }
+
       const result = await streamChatCompletion(orMessages, {
         tools: toolRegistry.toOpenRouterTools(),
         onTextDelta,
@@ -109,6 +133,14 @@ export async function runTurn(
         break; // model gave a final answer — no more tool calls requested
       }
 
+      // Second checkpoint, after the model call and before any tool runs:
+      // a Stop pressed while the model was thinking should never go on to
+      // spend credits on the tools it just asked for.
+      if (await isStopRequested(runId)) {
+        cancelled = true;
+        break;
+      }
+
       const toolCalls: OpenRouterToolCall[] = result.toolCalls.map((tc) => ({
         id: tc.id,
         type: "function",
@@ -120,14 +152,27 @@ export async function runTurn(
       // order in its results regardless of which finishes first), but the
       // content blocks and tool-role messages below are appended in the
       // model's original request order — deterministic either way.
+      //
+      // Each call emits its own started/finished tool-stream events as
+      // soon as *that* call reaches each point, rather than waiting for
+      // every call in this batch to finish — otherwise a fast crop_image
+      // running alongside a slow generate_image would have its own
+      // "finished" event held back by the slower one.
       const executed = await Promise.all(
-        result.toolCalls.map((tc, i) =>
-          executeToolCall(
+        result.toolCalls.map(async (tc, i) => {
+          onToolEvent?.({
+            kind: "started",
+            block: { type: "tool_use", id: tc.id, toolName: tc.name, input: undefined },
+          });
+          const outcome = await executeToolCall(
             { id: tc.id, name: tc.name, arguments: tc.arguments },
             toolSequence + i,
             { runId, chatId: run.chatId, ownerId },
-          ),
-        ),
+            { approvalState, onApprovalEvent: onToolEvent },
+          );
+          onToolEvent?.({ kind: "finished", block: outcome.toolUseBlock, result: outcome.toolResultBlock });
+          return outcome;
+        }),
       );
       toolSequence += executed.length;
 
@@ -141,14 +186,21 @@ export async function runTurn(
       }
     }
 
+    // A stopped turn keeps whatever it had already produced — the partial
+    // text and any tool calls that already completed (and were already
+    // charged for) stay on the message rather than being thrown away.
     await prisma.$transaction([
       prisma.message.update({
         where: { id: assistantMessage.id },
-        data: { status: "COMPLETE", content: asJsonInput(contentBlocks) },
+        data: { status: cancelled ? "CANCELLED" : "COMPLETE", content: asJsonInput(contentBlocks) },
       }),
       prisma.agentRun.update({
         where: { id: runId },
-        data: { status: "COMPLETE", endedAt: new Date(), model: finalModel },
+        data: {
+          status: cancelled ? "CANCELLED" : "COMPLETE",
+          endedAt: new Date(),
+          model: finalModel,
+        },
       }),
     ]);
   } catch (err) {

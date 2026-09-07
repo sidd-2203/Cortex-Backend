@@ -10,7 +10,13 @@
 
 const DEFAULT_BASE_URL = "https://inference.magica.com";
 const DEFAULT_POLL_INTERVAL_MS = 2000;
-const DEFAULT_TIMEOUT_MS = 120_000;
+// 120s looked generous until a real "quality": "High" GPT Image 2 run
+// (confirmed via Magica's own API afterwards) completed successfully well
+// past that mark - our own client gave up and reported failure on a
+// request that actually succeeded. 300s leaves real margin; agent-turn's
+// own maxDuration was raised alongside this so the task itself doesn't
+// become the next thing that times out first.
+const DEFAULT_TIMEOUT_MS = 300_000;
 
 export class MagicaError extends Error {
   constructor(
